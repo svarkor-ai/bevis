@@ -1,0 +1,51 @@
+# Three gates, in the order they get more expensive to be wrong about:
+#
+#   pytest              the rules still hold
+#   mutation_check.py   the tests that guard those rules can actually fail
+#   readme_check.py     the README still prints what the tool prints
+#
+# Everything the workflow needs is in this repository: the code, the tests, both
+# harnesses, and the dependency list they install from. No secrets, no services,
+# no other repository, nothing fetched from a URL written into these steps.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # [api] brings FastAPI and uvicorn so the HTTP tests run instead of
+      # skipping; [dev] brings pytest. Both are declared in pyproject.toml.
+      - name: Install
+        run: python -m pip install -e ".[api,dev]"
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # A green suite proves the suite ran. This proves each rule has a test
+      # that goes red when the rule is deleted.
+      - name: Mutation check
+        run: python tools/mutation_check.py
+
+      # Every transcript in README.md is executed and diffed against what the
+      # tool really printed. A document without a command behind it is
+      # decoration.
+      - name: README check
+        run: python tools/readme_check.py
