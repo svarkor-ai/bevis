@@ -43,6 +43,10 @@ What is NOT verified, stated plainly
   paths are rewritten. Where a transcript would print something unstable the
   README pipes it through a visible filter, so the reader can see what was
   elided and by what.
+* A `bevis ...` command written in prose rather than in a transcript cannot be
+  executed, so it is parsed against the CLI's own argparse surface instead: the
+  subcommand must exist and every flag must be one the CLI accepts. That check
+  covers README.md, PRIOR-ART.md, DOCTRINE.md and docs/DESIGN.md.
 * `bevis` and `python` resolve to shims created here, so the check always
   exercises THIS checkout with the interpreter running this script — never a
   copy of bevis that happens to be installed on the machine.
@@ -53,12 +57,14 @@ import argparse
 import difflib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 README = ROOT / "README.md"
 PYPROJECT = ROOT / "pyproject.toml"
 
@@ -252,6 +258,78 @@ def lint_pip(text: str, extras: set, problems: list) -> None:
                         % (number, name, ", ".join(sorted(extras)) or "none"))
 
 
+# ── Every `bevis ...` written in prose is checked against the real parser ────
+def cli_surface():
+    """The subcommands and options argparse actually accepts, from the CLI itself."""
+    from bevis.cli import build_parser
+
+    parser = build_parser()
+    top = {name for action in parser._actions for name in action.option_strings}
+    commands = {}
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                options = {o for a in sub._actions for o in a.option_strings}
+                nested = {}
+                for inner in sub._actions:
+                    if isinstance(inner, argparse._SubParsersAction):
+                        for sub_name, sub_parser in inner.choices.items():
+                            nested[sub_name] = {
+                                o for a in sub_parser._actions for o in a.option_strings}
+                commands[name] = (options, nested)
+    return top, commands
+
+
+def lint_inline_commands(path: Path, problems: list) -> None:
+    """A command written in prose is a claim too.
+
+    Transcripts are executed, which proves them. A `bevis ...` mentioned in a
+    sentence is not, so it is parsed against the real argparse surface instead:
+    the subcommand must exist and every flag must be one the CLI accepts. That
+    is how a README ends up documenting a `--force` nobody implemented.
+    """
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"^```.*?^```", "", text, flags=re.M | re.S)   # fences run instead
+    top, commands = cli_surface()
+    for span in re.findall(r"`([^`\n]+)`", text):
+        if not re.match(r"^bevis\b", span.strip()):
+            continue
+        try:
+            tokens = shlex.split(span.strip())
+        except ValueError:
+            problems.append("%s: cannot parse the command `%s` written in prose"
+                            % (path.name, span))
+            continue
+        tokens = tokens[1:]
+        while tokens and tokens[0] in top:
+            tokens.pop(0)
+        if not tokens:
+            continue
+        command = tokens.pop(0)
+        if command not in commands:
+            problems.append(
+                "%s: `%s` — %r is not a bevis subcommand (have: %s)"
+                % (path.name, span, command, ", ".join(sorted(commands))))
+            continue
+        allowed, nested = commands[command]
+        if nested and tokens and tokens[0] in nested:
+            allowed = allowed | nested[tokens.pop(0)]
+        elif nested and tokens and not tokens[0].startswith("-"):
+            problems.append(
+                "%s: `%s` — %r is not a `bevis %s` subcommand (have: %s)"
+                % (path.name, span, tokens[0], command, ", ".join(sorted(nested))))
+            continue
+        for token in tokens:
+            if not token.startswith("--"):
+                continue
+            flag = token.split("=", 1)[0]
+            if flag not in allowed:
+                problems.append(
+                    "%s: `%s` — `bevis %s` has no %s flag (has: %s)"
+                    % (path.name, span, command, flag,
+                       ", ".join(sorted(o for o in allowed if o.startswith("--")))))
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def check(record: bool, keep: bool) -> int:
     if not README.exists():
@@ -262,6 +340,10 @@ def check(record: bool, keep: bool) -> int:
 
     problems: list = []
     lint_pip(text, declared_extras(), problems)
+    for doc in (README, ROOT / "PRIOR-ART.md", ROOT / "DOCTRINE.md",
+                ROOT / "docs" / "DESIGN.md"):
+        if doc.exists():
+            lint_inline_commands(doc, problems)
     for block in blocks:
         if not block.is_transcript:
             lint_inert(block, problems)
