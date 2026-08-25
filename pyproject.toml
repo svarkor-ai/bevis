@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bevis"
+version = "0.1.0"
+description = "A job board where a job cannot close without machine-checkable evidence."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["agents", "jobs", "verification", "evidence", "gate", "orchestration"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+# No runtime dependencies. The core must install and run on a machine with
+# nothing but Python, because that is where verification has to happen.
+dependencies = []
+
+[project.optional-dependencies]
+api = ["fastapi>=0.100", "uvicorn>=0.23"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+bevis = "bevis.cli:main"
+
+[tool.setuptools]
+packages = ["bevis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
