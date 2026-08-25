@@ -57,7 +57,7 @@ without the evidence attached.
 | **pi-tasks** (published by `nczz`, MIT) | "Pi-native execution contracts for AI agents — evidence-gated completion, ordered plans, and compaction-safe resume". | Ships bevis's core invariant already, inside the Pi runtime: "Agents cannot mark work done without traceable, reproducible proof", and `task_complete` rejects when "No evidence exists" or "All evidence is only `not_verified`". It also solves something bevis ignores — surviving context compaction, with resume on `session_start`. | It is bound to the Pi agent runtime and its evidence is artifact references; whether a command and exit code are captured automatically is **UNVERIFIED** (the page does not say). bevis is runtime-agnostic, calls no model, and shells out to any command. | [pi.dev/packages/pi-tasks](https://pi.dev/packages/pi-tasks) |
 | **Task Master** (`eyaltoledano/claude-task-master`) | "A task management system for AI-driven development with Claude" — parses a PRD into a decomposed task tree. | Decomposition is its whole craft, and it is enormously more popular. If your problem is "turn this spec into a sensible ordered task list", this is the tool. | Licence is **MIT with Commons Clause**, which is not OSI-open: "Not Allowed: Sell Task Master itself, Offer Task Master as a hosted service, Create competing products based on Task Master". No acceptance-bar-on-close mechanism appears in the README I read. bevis is plain Apache-2.0. | [repo](https://github.com/eyaltoledano/claude-task-master) |
 | **OpenHands** (`All-Hands-AI/OpenHands`, MIT) | "The self-hosted developer control center for coding agents and automations" — "Run OpenHands, Claude Code, Codex, Gemini, or any ACP-compatible agent across local, remote, and cloud backends." | It is the thing that does the work. Sandboxes, runtimes, a UI, integrations, and years of engineering. bevis is not in this category and should not be compared on it. | It is a worker, not a ledger: no durable acceptance-gated job record documented in the README I read. bevis is a sane thing to put *in front of* OpenHands — it can dispatch to it and refuse to close on its say-so. | [repo](https://github.com/All-Hands-AI/OpenHands) |
-| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested` — "checks command/exit-code/output" — and `ProducerAuthorized` — "checks actor authorization". If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file that you can run from a checkout today (it is not published on any index), with a much thinner notion of evidence (no freshness binding, no signatures, no tamper-evidence). | [arXiv](https://arxiv.org/abs/2607.14890) |
+| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested`, which "checks command, arguments, working directory, exit code, and output digest when execution is required", and `ProducerAuthorized`, which "checks that the actor, lane, host/session, or signing key is authorized for the claim" — both strictly stronger than what bevis stores. If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file that you can run from a checkout today (it is not published on any index), with a much thinner notion of evidence (no freshness binding, no signatures, no tamper-evidence). | [arXiv](https://arxiv.org/abs/2607.14890) |
 
 ---
 
@@ -174,8 +174,9 @@ whether the test still *means* what the row says.
 
 - **Not novel storage.** It is SQLite. Everything durable here is a table.
 - **Not a scheduler.** No cron, no calendar, no distributed queue, no retries, no backoff, no
-  replay. If a machine dies mid-job, bevis knows the job did not close; it does not resume it.
-  For that, use Temporal or Prefect.
+  replay. If a machine dies mid-job, bevis knows the job did not close and `bevis reclaim`
+  can hand it back to the queue, but it does not resume the work. For that, use Temporal or
+  Prefect.
 - **Not an agent framework.** No prompts, no tools, no memory, no planner, no model calls of any
   kind. It shells out and reads exit codes. If you want an agent, bring OpenHands, Claude Code,
   Codex, a Makefile, or anything else that runs.
@@ -197,8 +198,9 @@ This is the honest part, and it belongs in the same file as the pitch.
   July 2026) states the principle better than bevis does — "permits lifecycle transitions only
   when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant
   gate" — and its admissibility conditions are strictly stronger than bevis's, including
-  freshness, integrity and producer authorisation alongside `ExecutionAttested`
-  ("checks command/exit-code/output"). bevis implements a weaker version of a published idea.
+  freshness, integrity and producer authorisation alongside `ExecutionAttested`, which
+  "checks command, arguments, working directory, exit code, and output digest when execution
+  is required". bevis implements a weaker version of a published idea.
 - **At least one shipped tool already enforces the exact invariant.** pi-tasks: "Agents cannot
   mark work done without traceable, reproducible proof", with `task_complete` rejecting when
   "No evidence exists". It is bound to the Pi runtime; the invariant is the same one.
@@ -222,7 +224,10 @@ and if you know of a project that does it, it belongs on this page.
 
 ## Sources
 
-All fetched 2026-08-25 unless noted. Quotes above come from these pages.
+All fetched 2026-08-25 unless noted. Quotes above come from these pages. The two quotes
+that carry the most weight against bevis — the *Proof-or-Stop* admissibility conditions and
+pi-tasks' completion contract — were re-fetched from the pages below on 2026-08-25 and
+restored to their exact wording; the rest are as first read.
 
 - beads — https://github.com/gastownhall/beads · https://github.com/gastownhall/beads/blob/main/AGENT_INSTRUCTIONS.md · https://beads.gascity.com/workflows/gates
 - Backlog.md — https://github.com/MrLesk/Backlog.md
