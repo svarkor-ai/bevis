@@ -9,6 +9,7 @@ description = "A job board where a job cannot close without machine-checkable ev
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+authors = [{ name = "Alexander Lektove", email = "alexander@sibbamala.com" }]
 keywords = ["agents", "jobs", "verification", "evidence", "gate", "orchestration"]
 classifiers = [
   "Development Status :: 3 - Alpha",

@@ -183,6 +183,16 @@ atomic claim usually still passes, because the race rarely loses. Slot
 exclusivity is asserted by comparing recorded run intervals, and argued from the
 code — not proved by a mutant.
 
+`tools/readme_check.py` holds the documentation to the same standard: every
+transcript in `README.md` is executed and diffed against the bytes the tool
+really printed, so a renamed flag or an invented message fails the build instead
+of being discovered by the first person who copies a line out of it. A separate
+suite (`tests/test_docs_claims.py`) asserts that every test name the documents
+cite still exists, and `tests/test_no_dependencies.py` reads the package's own
+imports with `ast` so "stdlib only, no network, no model" is checked rather than
+promised. All of it runs on every push and pull request
+(`.github/workflows/ci.yml`).
+
 ## 11. Deliberate non-goals
 
 * **No retries, schedules or DAG execution.** Durable execution engines exist and
