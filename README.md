@@ -96,9 +96,10 @@ $ bevis ready
 (nothing ready)
 ```
 
-A blocking check that has *never been run* does not block readiness — checks
-usually run after the work — but it does block the close. Unproven is not the
-same as passing.
+Job 1 is verified and job 2 was the only other candidate, so a gate that came
+back non-zero emptied the queue. A blocking check that has *never been run* does
+not block readiness — checks usually run after the work — but it does block the
+close. Unproven is not the same as passing.
 
 ## The dispatcher never decides success
 
