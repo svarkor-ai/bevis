@@ -129,6 +129,10 @@ an adapter exiting 0 proves that it did not crash and nothing else. Only the
 job's checks can say whether the bar was met, and a job with no checks was never
 verifiable to begin with. bevis says so instead of quietly calling it done.
 
+`examples/adapter-echo.sh` is the smallest adapter that does anything: it prints
+the job it was handed, exits 0, and says in its own comments why exiting 0 is not
+a claim to have finished.
+
 `blocked` and `failed` are sticky: neither is `open`, so the next drain will not
 pick the job up again. A job that could not be proved is a job a human should
 look at, and a queue that silently retries it forever is how one broken step

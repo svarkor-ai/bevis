@@ -43,6 +43,7 @@ What is NOT verified, stated plainly
   paths are rewritten. Where a transcript would print something unstable the
   README pipes it through a visible filter, so the reader can see what was
   elided and by what.
+* Every path into this repository that the docs name in backticks must exist.
 * A `bevis ...` command written in prose rather than in a transcript cannot be
   executed, so it is parsed against the CLI's own argparse surface instead: the
   subcommand must exist and every flag must be one the CLI accepts. That check
@@ -330,6 +331,25 @@ def lint_inline_commands(path: Path, problems: list) -> None:
                        ", ".join(sorted(o for o in allowed if o.startswith("--")))))
 
 
+#: A path inside this repository, as written in prose: `tools/readme_check.py`.
+#: It has to start with one of our directories AND end in a file extension, so
+#: that neither another project's file (`AGENTS.md`, `MrLesk/Backlog.md`) nor a
+#: quoted method name from someone else's API (`tools/call`) is mistaken for ours.
+REPO_PATH_RE = re.compile(
+    r"^(?:bevis|tests|tools|docs|examples|\.github)/[\w./-]+"
+    r"\.(?:py|md|sh|ya?ml|toml|txt|cfg|ini|json)$")
+
+
+def lint_repo_paths(path: Path, problems: list) -> None:
+    """A cited file that does not exist is the oldest documentation defect there is."""
+    text = path.read_text(encoding="utf-8")
+    for span in re.findall(r"`([^`\n]+)`", text):
+        candidate = span.strip()
+        if REPO_PATH_RE.match(candidate) and not (ROOT / candidate).exists():
+            problems.append("%s: `%s` does not exist in the repository"
+                            % (path.name, candidate))
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def check(record: bool, keep: bool) -> int:
     if not README.exists():
@@ -344,6 +364,7 @@ def check(record: bool, keep: bool) -> int:
                 ROOT / "docs" / "DESIGN.md"):
         if doc.exists():
             lint_inline_commands(doc, problems)
+            lint_repo_paths(doc, problems)
     for block in blocks:
         if not block.is_transcript:
             lint_inert(block, problems)
