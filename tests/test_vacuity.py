@@ -162,13 +162,27 @@ def test_close_with_vacuous_output_is_refused(conn, job):
     assert core.get_job(conn, job["id"])["status"] == "open"
 
 
-def test_close_run_on_a_runner_that_found_no_tests_is_refused(conn, job, tmp_path):
-    empty = tmp_path / "no_tests_here"
-    empty.mkdir()
+# A runner that reports "Ran 0 tests" and still exits 0.
+#
+# These two tests used `python3 -m unittest discover` over an empty directory.
+# That is version-dependent: on 3.10 it prints "OK" and exits 0, but Python 3.12
+# changed unittest to print "NO TESTS RAN" and exit 5. On 3.12 the close was then
+# refused by the EXIT-CODE rule before the vacuity rule was ever consulted, so the
+# tests failed on an assertion about which refusal fired — while bevis behaved
+# correctly on both. The fixture, not the product, was the version-dependent part.
+#
+# (Python 3.12 adopting "ran no tests" as a failure is the same rule this module
+# exists to enforce. We keep testing our own, which must hold when the runner
+# under test exits 0.)
+VACUOUS_RUNNER = (
+    "printf '%s\\n' '' "
+    "'----------------------------------------------------------------------' "
+    "'Ran 0 tests in 0.000s' '' 'OK'"
+)
+
+def test_close_run_on_a_runner_that_found_no_tests_is_refused(conn, job):
     with pytest.raises(Refusal) as excinfo:
-        core.close_by_running(
-            conn, job["id"],
-            "python3 -m unittest discover -s %s" % empty)
+        core.close_by_running(conn, job["id"], VACUOUS_RUNNER)
     assert "measured nothing" in str(excinfo.value)
     assert core.get_job(conn, job["id"])["status"] == "open"
 
@@ -178,11 +192,8 @@ def test_close_with_real_output_is_untouched_by_the_rule(conn, job):
     assert closed["status"] == "closed"
 
 
-def test_cli_close_on_a_vacuous_run_exits_1(cli, conn, job, tmp_path):
-    empty = tmp_path / "empty_suite"
-    empty.mkdir()
-    code, _, err = cli("close", str(job["id"]), "--run",
-                       "python3 -m unittest discover -s %s" % empty)
+def test_cli_close_on_a_vacuous_run_exits_1(cli, conn, job):
+    code, _, err = cli("close", str(job["id"]), "--run", VACUOUS_RUNNER)
     assert code == EXIT_REFUSED
     assert "measured nothing" in err
     assert core.get_job(conn, job["id"])["status"] == "open"
