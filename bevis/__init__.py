@@ -11,5 +11,5 @@ script, a CI runner, or an AI agent, and bevis treats them all identically —
 it believes the exit code, never the narrator.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = ["__version__"]
