@@ -142,15 +142,17 @@ requeues it.
 
 ## Install
 
-bevis is not on PyPI. The name `bevis` was still unclaimed there when this was
-written (checked 2026-08-25), and nothing has been published under it, so
-installing by name will not get you this tool — treat any package that appears
-under that name as somebody else's until this README says otherwise. Install
-from a checkout:
+```sh
+pip install bevis          # the CLI: pure stdlib, zero dependencies
+pip install 'bevis[api]'   # optional: the HTTP API (FastAPI + uvicorn)
+```
+
+Published from this repository by GitHub Actions using PyPI Trusted Publishing,
+so no API token exists to be leaked or rotated. Or from a checkout:
 
 ```sh
-pip install -e .          # the CLI: pure stdlib, zero dependencies
-pip install -e '.[api]'   # optional: the HTTP API (FastAPI + uvicorn)
+pip install -e .
+pip install -e '.[api]'
 ```
 
 The core deliberately depends on nothing. Verification has to happen where the

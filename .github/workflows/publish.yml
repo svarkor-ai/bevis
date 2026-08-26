@@ -1,0 +1,58 @@
+name: publish
+
+# PyPI Trusted Publishing: no API token exists anywhere. PyPI authenticates this
+# workflow by its OIDC identity (repo svarkor-ai/bevis, workflow publish.yml), so
+# there is no secret to leak, rotate, or accidentally publish.
+#
+# The build job runs the project's own gates first. If bevis will not clear the
+# bar it asks of others, it does not ship.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade build twine
+          python -m pip install -e ".[api,dev]"
+      # The same three gates ci.yml runs, invoked the same way. `unittest
+      # discover` finds ZERO tests in this layout and still exits 0 — a gate
+      # that cannot fail is not a gate.
+      - name: Tests
+        run: python -m pytest -q
+      - name: Mutation check
+        run: python tools/mutation_check.py
+      - name: README check
+        run: python tools/readme_check.py
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check the artifacts are uploadable
+        run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # the whole authentication story
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

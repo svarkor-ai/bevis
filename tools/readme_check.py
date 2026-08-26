@@ -84,6 +84,10 @@ SHELLISH = {"sh", "bash", "shell", "console", "text", ""}
 INERT_ALLOWED = (
     re.compile(r"^pip install -e ['\"]?\.(\[[a-z0-9,._-]+\])?['\"]?$"),
     re.compile(r"^python -m pip install -e ['\"]?\.(\[[a-z0-9,._-]+\])?['\"]?$"),
+    # bevis is on PyPI as of the launch commit, so installing it by name is a
+    # command that works. It stays INERT on purpose: see lint_pip.
+    re.compile(r"^pip install ['\"]?bevis(\[[a-z0-9,._-]+\])?['\"]?$"),
+    re.compile(r"^python -m pip install ['\"]?bevis(\[[a-z0-9,._-]+\])?['\"]?$"),
 )
 
 
@@ -242,14 +246,17 @@ def lint_inert(block: Block, problems: list) -> None:
 
 def lint_pip(text: str, extras: set, problems: list) -> None:
     for number, line in enumerate(text.split("\n"), 1):
+        prompted = line.strip().startswith(PROMPT)
         stripped = re.sub(r"^\$ ", "", line.strip())
         if not re.match(r"^(python -m )?pip install\b", stripped):
             continue
-        if re.match(r"^(python -m )?pip install\s+['\"]?bevis(\[|['\"]?$)", stripped):
+        if prompted and re.match(
+                r"^(python -m )?pip install\s+['\"]?bevis(\[|['\"]?$)", stripped):
             problems.append(
-                "README.md line %d: %r — bevis is not published on PyPI, so this "
-                "command cannot work. Show `pip install -e .` from a checkout."
-                % (number, stripped))
+                "README.md line %d: %r — a prompted block is EXECUTED by this "
+                "checker, and installing from PyPI would make the README test "
+                "depend on the network and on a published release. Show it in a "
+                "block with no '$ ' prompt." % (number, stripped))
         for extra in re.findall(r"\[([a-z0-9,._-]+)\]", stripped):
             for name in extra.split(","):
                 if name and name not in extras:

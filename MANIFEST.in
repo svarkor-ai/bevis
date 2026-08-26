@@ -1,0 +1,5 @@
+# The README links to these; an sdist that omits them ships broken links.
+include LICENSE
+include DOCTRINE.md
+include PRIOR-ART.md
+recursive-include docs *.md
