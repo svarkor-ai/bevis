@@ -193,6 +193,167 @@ with `bevis init` in the message. That is the same shape as the adapter
 registry's refusal (§7), for the same reason: a stranger should not meet a raw
 `sqlite3.OperationalError` about a column.
 
+## 1b. The event log is hash-chained
+
+Until 0.3.0 this document's list of known holes said, at number seven, that the
+event log was not tamper-evident and that anyone with the file could rewrite
+history. That was an acceptable thing to concede while bevis was a task board: a
+person reading the board notices a story that does not add up. It stopped being
+acceptable when the event stream became something a training pipeline reads,
+because "anyone with the SQLite file could have rewritten this" is a much weaker
+sentence about a dataset than about a to-do list.
+
+So every row in `event` now carries the hash of the row before it.
+
+### What is hashed, exactly
+
+The full argument lives in `bevis/chain.py`, where the code that does it is. The
+form is:
+
+```
+bevis-event-v1\n
+prev=<n>:<the previous event's hash, or 64 zeros for the first>\n
+id=<n>:<the event's integer id, in decimal>\n
+ts=<n>:<the event's timestamp, exactly as stored>\n
+job_id=<n>:<the job's integer id, or empty when the event has no job>\n
+actor=<n>:<the actor, exactly as stored>\n
+kind=<n>:<the kind, exactly as stored>\n
+detail=<n>:<the detail, exactly as stored>\n
+```
+
+`<n>` is the length **in bytes** of the value after the colon. The digest is
+`sha256` of those bytes, lowercase hex. Nothing is normalised on the way in: no
+trimming, no case folding, no JSON, no sorting. A canonicalisation with choices
+in it is a canonicalisation two implementations can disagree about, and the
+point of writing it down is that a stranger with a hex editor and `sha256sum`
+can arrive at the same number.
+
+Three decisions worth the argument:
+
+* **The length prefix is not decoration.** `detail` is free text somebody else
+  wrote; it can and does contain newlines and `=` signs. Without a length, a
+  detail can be written that reproduces the lines of a different event exactly,
+  and two different events would hash the same.
+  `test_a_field_containing_a_newline_cannot_impersonate_another_field` builds
+  that collision, asserts it really is one under the shorter form, and asserts
+  the real form does not have it. The mutant is
+  `chain-canonical-form-drops-the-length-prefix`.
+* **The format name is inside the hash.** If the field list or the encoding ever
+  changes, `bevis-event-v1` changes with it, and no old row can be silently
+  reinterpreted under new rules.
+* **`id` is hashed, so rows cannot be renumbered or re-ordered**, and `prev` is
+  hashed, so they cannot be moved between chains.
+
+`bevis check --chain --bytes <event-id>` prints exactly those bytes, so
+`| sha256sum` recomputes the row's hash with no bevis code in the loop. The
+README does that on every push and diffs the answer against the stored hash —
+otherwise the paragraph above would be a claim about the format rather than a
+description of it (DOCTRINE 5).
+
+### What the checker says
+
+`bevis check --chain` walks the log in id order and stops at the **first** place
+the arithmetic fails, naming it. "Invalid" is not an answer anybody can act on.
+Four kinds of break, all of them located:
+
+| what happened | what the checker says |
+|---|---|
+| a row was edited | `chain BROKEN at event 7` — its stored hash and the recomputed one, side by side |
+| a row was deleted or re-ordered | `chain BROKEN at event 8` — event 8 links to a hash the event before it does not have |
+| a row was inserted by hand | `chain BROKEN at event 9` — event 9 carries no hash, so bevis did not write it |
+| rows were cut off the end | `chain BROKEN at event 12` — the log ends at event 9 and the board records 12 as its head (until the next append; see below) |
+
+The last one is the reason the head is written to `meta` on every append. A hash
+chain says nothing about a row that is no longer there: lop the last three
+events off and what remains is a perfectly valid chain. The recorded head is the
+only thing that notices, and it is why cutting a close out of the log is not a
+one-line delete.
+
+It notices for a while, not forever, and the limit is worth being exact about.
+SQLite hands a deleted row's id straight back to the next insert, so after
+`DELETE FROM event WHERE id=12` the next event bevis appends is also id 12, it
+links correctly to event 11, and `set_head` moves the bookmark onto it. From
+that moment the log verifies clean and event 12's original contents are gone
+without a trace. Closing that properly would mean either never reusing an id —
+which is a table rebuild, not the additive migration this release is careful to
+be — or a marker in `meta`, which the same hand deletes. So it is stated instead,
+in the README's Limitations: verify the chain often, and against a head hash you
+kept somewhere else.
+
+The report always says how far the log verified before the break, because the
+events before a break are still proved and throwing them away would be
+destroying evidence to punish an edit.
+
+### Starting the chain on a board that already exists
+
+`bevis init` gained a step, and it is deliberately not quiet about it.
+
+* On a board with **no events**, the chain starts at zero: every event that
+  board will ever have was hashed as it was written. `meta.chain_mode` is
+  `fresh`.
+* On a board that **already has events**, those rows are hashed into the chain
+  as they stand at that moment, `meta.chain_mode` is `adopted`, and
+  `meta.chain_sealed_through` records the last pre-existing id. From then on an
+  edit to one of them is detectable. What it cannot do is say what those rows
+  said *before* — sealing proves unchanged-since-adoption, not
+  unchanged-since-written, and the two are not the same claim.
+
+Both cases also write an ordinary `chain_started` event, so the record of where
+the chain begins is itself inside the chain, and both are visible in
+`bevis check --chain`'s `started` line. A chain that begins at an unrecorded
+point is a provenance claim with a hole in it; recording the mode is what fills
+it, and `chain-adoption-claims-the-old-rows-were-hashed-when-written` is the
+mutant that proves the record is load-bearing.
+
+**A started chain is never restarted.** Running `bevis init` again on a board
+whose chain is already going does nothing to the log. That is not an
+optimisation: re-sealing would recompute every hash over whatever is in the file
+today, turning a planted edit into a clean chain and calling it a migration —
+the tool destroying the evidence it exists to keep.
+`test_init_does_not_launder_a_tamper` plants an edit, runs `bevis init`, and
+asserts the chain is still reported broken.
+
+A board written by a bevis older than this one has no columns to put a hash in.
+It keeps working — dropping the audit trail to protect a chain that does not
+exist yet would be the wrong trade — and `bevis check --chain` reports the
+board, names `bevis init`, and exits non-zero.
+
+### Concurrency
+
+The id is part of what is hashed and SQLite assigns it, so `log_event()` inserts
+the row and then stamps it, and both statements plus the head bookmark run
+inside one write transaction: its own when the caller does not already hold one,
+the caller's when it does (the dispatcher claims a job and logs it under a
+single `BEGIN IMMEDIATE`). Without that, two slots appending at the same instant
+could read the same predecessor and produce a fork — which would read exactly
+like a tamper, on a board nobody had touched.
+`test_the_chain_survives_four_slots_appending_at_once` drains eight jobs across
+four slots and then verifies the chain.
+
+### What this is not
+
+It is tamper-**evident**, not tamper-proof, and the difference is the whole of
+the honest reading:
+
+* **The chain lives in the same file as the log it protects.** Somebody who
+  holds the board and knows this format can rewrite every row, recompute every
+  hash, and move `meta.chain_head_hash` to match. What is gone is the cheap
+  version — one `UPDATE` on one row, invisible afterwards. What closes the rest
+  is not more code here: it is copying the head hash somewhere else, which is
+  why `bevis check --chain` prints it and says so.
+* **There is no signature and no clock authority.** Both would mean bevis
+  holding a secret, and a tool whose selling point is that it has no field for
+  your credentials does not get to grow one for its own.
+* **The chain covers the event log, not the job rows.** The event that recorded
+  a close is hashed; the `verify_output` column on `job` is not. An edit to
+  stored evidence is not detected by the chain — the *narrative* is sealed, the
+  columns it describes are not. Chaining those too is a bigger change than this
+  one and is deliberately not in 0.3.0.
+* **It proves nothing about a board that never ran a check.** A chain is only
+  evidence if somebody verifies it, which is why `bevis doctor` now does, and
+  why `bevis check --chain` is a command you can put in CI or attach to a job as
+  a blocking check of its own.
+
 ## 2. Why `acceptance` is required at create
 
 A job with no stated bar cannot be verified by anyone, which means it can only
@@ -435,6 +596,12 @@ passing for the wrong reason — the transition table was rejecting the bad stat
 before the vocabulary check ever ran, so the vocabulary check itself was
 unproven. Two tests were added that exercise it directly.
 
+The chain (§1b) is tested in both directions for the same reason the vacuity
+lexicon is: a tamper detector that has only ever been run against a clean log is
+exactly the check that cannot fail this project exists to refuse. Every planted
+edit must be caught AND located, and an untouched log must come back clean —
+`chain-verification-refuses-an-untouched-log` is the mutant for the second half.
+
 Known limit: race conditions are not mutation-testable this way. Removing the
 atomic claim usually still passes, because the race rarely loses. Slot
 exclusivity is asserted by comparing recorded run intervals, and argued from the
@@ -488,21 +655,29 @@ itself.
    than the obvious version (§1a), and blind to a domain counter that is simply
    wrong — `redacted_count: 0` from a redactor that redacted 178 times reads like
    any other number.
-7. **The event log is not tamper-evident.** No hash chain, no signatures. Anyone
-   with the file can rewrite history; bevis raises the effort, it does not make
-   it impossible.
-8. **Concurrency is single-machine.** SQLite + WAL is fine for slots on one host
+7. **The event log is tamper-evident, not tamper-proof.** The chain (§1b)
+   detects an edited row, a deleted row, a hand-inserted row and a truncated
+   tail, and names the first one. It cannot detect a rewrite of everything by
+   somebody who holds the file and knows the format, because the chain sits in
+   the same file — the answer to that is to keep a copy of the head hash
+   elsewhere, and `bevis check --chain` prints it for that purpose. There are no
+   signatures, because a signing key would be a secret bevis holds.
+8. **The chain covers the event log, not the evidence columns.** The event that
+   recorded a close is hashed; `job.verify_output` is not. Somebody editing the
+   stored output of a closed job breaks nothing the chain can see. It is the
+   obvious next move and is deliberately not in 0.3.0.
+9. **Concurrency is single-machine.** SQLite + WAL is fine for slots on one host
    and for a small team through the HTTP API. It is not a distributed queue.
-9. **No pagination, no full-text search.** Boards of a few thousand jobs are
+10. **No pagination, no full-text search.** Boards of a few thousand jobs are
    fine; a hundred thousand are not the target.
-10. **The credential refusal on `bevis adapter add` is a lint.** It knows five
+11. **The credential refusal on `bevis adapter add` is a lint.** It knows five
    shapes and the README lists them; `curl -u user:pass`, an `X-Auth-Token:`
    header, a `?token=` in a query string and anything encoded all walk past. It
    also guards only that one command: a raw `bevis run --adapter '<command>'`
    reaches `job_run.adapter_cmd` unlinted. What is structural is that bevis has
    no field that asks for a secret; what is heuristic is the refusal that stops
    you writing one into the field it does have.
-11. **A doctor probe proves an adapter answers, not that it works.** One call,
+12. **A doctor probe proves an adapter answers, not that it works.** One call,
    with a throwaway job and `BEVIS_DOCTOR_PROBE=1` — an adapter that
    short-circuits on that flag has told doctor almost nothing. Doctor reports
    what it ran and nothing else, which is why every adapter it did not call is

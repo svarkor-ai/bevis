@@ -81,7 +81,9 @@ that resolves, one real end-to-end read — before calling anything done.
 
 **In bevis.** The evidence a job closes with is a command's exit code *and* its captured output,
 both stored. Output is kept specifically so a later reader can check what it actually said, not just
-that something returned zero.
+that something returned zero. The event log around it is hash-chained, so that later reader can also
+ask whether the record has been edited since — `bevis check --chain` names the first row where the
+arithmetic stops working. It detects an edit; it cannot prevent one, and it says so.
 
 ## 4. A fallback or failover surface is a second publishing surface
 

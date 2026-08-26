@@ -11,10 +11,10 @@ import json
 import sys
 from typing import Optional
 
-from . import __version__, adapters, core, doctor
+from . import __version__, adapters, chain, core, doctor
 from .db import connect, get_job, init_db, resolve_db_path
 from .dispatch import dispatch
-from .errors import BevisError
+from .errors import BevisError, NotFound, UsageError
 from .model import EXIT_OK, STATUSES
 
 
@@ -163,7 +163,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actor", default="")
 
     p = sub.add_parser("check", help="checks: the gates that block a job")
-    csub = p.add_subparsers(dest="check_command", required=True)
+    p.add_argument("--chain", action="store_true",
+                   help="verify the event log's hash chain and name the first "
+                        "broken link (exits 1 if it is broken)")
+    p.add_argument("--bytes", metavar="EVENT_ID",
+                   help="with --chain: print the exact bytes hashed for one "
+                        "event, so `| sha256sum` recomputes its hash without "
+                        "bevis in the loop")
+    csub = p.add_subparsers(dest="check_command")
     c = csub.add_parser("add")
     c.add_argument("id")
     c.add_argument("--name", required=True)
@@ -233,6 +240,26 @@ def _read_output_file(path: Optional[str]) -> Optional[str]:
         return sys.stdin.read()
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         return handle.read()
+
+
+def chain_bytes(conn, raw_event_id) -> bytes:
+    """The canonical bytes for one event, exactly as they were hashed.
+
+    Printed raw, with no heading and no trailing newline of its own, because the
+    only useful thing to do with them is pipe them into a hasher that has never
+    heard of bevis and compare. A pretty-printer here would be bevis marking its
+    own homework.
+    """
+    text = str(raw_event_id).strip()
+    if not text.isdigit():
+        raise UsageError("--bytes takes an event id, like `--bytes 4`; "
+                         "`bevis events <job>` lists them")
+    row = conn.execute(
+        "SELECT id, ts, job_id, actor, kind, detail, prev_hash, hash "
+        "FROM event WHERE id=?", (int(text),)).fetchone()
+    if row is None:
+        raise NotFound("no event %s in this log" % text)
+    return chain.row_bytes(row, row["prev_hash"] or chain.GENESIS_PREV)
 
 
 def run_command_line(args, db_path) -> int:
@@ -347,6 +374,25 @@ def run_command_line(args, db_path) -> int:
                  % job["display_id"])
 
         elif args.command == "check":
+            if args.chain:
+                if args.bytes is not None:
+                    sys.stdout.buffer.write(chain_bytes(conn, args.bytes))
+                    sys.stdout.flush()
+                    return EXIT_OK
+                report = chain.verify(conn)
+                emit(report, as_json, chain.render(report))
+                return chain.exit_code(report)
+            if args.bytes is not None:
+                raise UsageError(
+                    "--bytes belongs to `bevis check --chain`: it prints the "
+                    "bytes that event's hash is taken over")
+            if args.check_command is None:
+                # Exit 2, the same code argparse produced when this subcommand
+                # was mandatory. Adding --chain must not change what an existing
+                # script sees when it mistypes a check command.
+                raise UsageError(
+                    "`bevis check` needs a subcommand — add, list, run or rm — "
+                    "or --chain to verify the event log's hash chain")
             if args.check_command == "add":
                 row = core.add_check(conn, args.id, args.name, args.cmd,
                                      blocking=args.blocking, actor=args.actor)

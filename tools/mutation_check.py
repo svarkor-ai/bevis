@@ -341,6 +341,108 @@ MUTANTS = [
             results.append(_result("adapters", OK, "%s ran" % row["name"]))
         else:''',
      ["test_doctor_does_not_call_an_adapter_it_was_not_asked_to_call"]),
+
+    # ── The event log's hash chain ──────────────────────────────────────────
+    # Every mutant below is planted against a log that HAS been tampered with,
+    # except the two marked otherwise: a chain checker that only ever passes is
+    # the exact defect this project exists to refuse, so the direction that
+    # matters most is the one where an untouched log must come back clean.
+    ("chain-edited-row-passes-verification", "bevis/chain.py",
+     '''    recomputed = row_hash(row, expected_prev)
+    if recomputed != row["hash"]:''',
+     '''    recomputed = row_hash(row, expected_prev)
+    if False:''',
+     ["test_a_planted_edit_to_a_historical_row_is_detected_and_named",
+      "test_cli_check_chain_exits_1_and_names_the_row_on_a_tampered_log",
+      "test_an_edit_to_a_row_sealed_at_adoption_is_still_detected"]),
+
+    ("chain-deleted-row-passes-verification", "bevis/chain.py",
+     '''    stored_prev = row["prev_hash"] or GENESIS_PREV
+    if stored_prev != expected_prev:''',
+     '''    stored_prev = row["prev_hash"] or GENESIS_PREV
+    if False:''',
+     ["test_a_deleted_event_is_detected_at_the_next_link",
+      "test_rehashing_the_edited_row_still_breaks_the_next_link"]),
+
+    ("chain-unhashed-row-passes-verification", "bevis/chain.py",
+     '''    if not row["hash"]:''',
+     '''    if False:''',
+     ["test_a_hand_inserted_event_is_detected_as_unchained"]),
+
+    ("chain-truncated-log-passes-verification", "bevis/chain.py",
+     '''        if report["last_id"] != report["head_id"] or prev != report["head_hash"]:''',
+     '''        if False:''',
+     ["test_events_cut_off_the_end_are_detected_by_the_recorded_head"]),
+
+    # The other direction, and the one that decides whether this is a gate or an
+    # obstacle: a checker that refuses an untouched log is not strict, it is
+    # broken, and it teaches people to stop running it.
+    ("chain-verification-refuses-an-untouched-log", "bevis/chain.py",
+     '''    recomputed = row_hash(row, expected_prev)''',
+     '''    recomputed = row_hash(row, GENESIS_PREV)''',
+     ["test_an_untouched_log_verifies_clean",
+      "test_cli_check_chain_exits_0_on_an_untouched_log",
+      "test_the_chain_survives_four_slots_appending_at_once"]),
+
+    # The write side. A chain whose every link points at the genesis value is a
+    # list of hashes, not a chain, and nothing downstream would notice a gap.
+    ("chain-every-event-links-to-genesis", "bevis/db.py",
+     '''        prev = chain.head_hash(conn)''',
+     '''        prev = chain.GENESIS_PREV''',
+     ["test_an_untouched_log_verifies_clean",
+      "test_every_event_bevis_writes_is_hashed"]),
+
+    # The length prefix is the whole of the canonicalisation argument: without
+    # it a `detail` somebody else wrote can reproduce another event's lines.
+    ("chain-canonical-form-drops-the-length-prefix", "bevis/chain.py",
+     '''    return b"".join([name.encode("ascii"), b"=",
+                     str(len(raw)).encode("ascii"), b":", raw, b"\\n"])''',
+     '''    return b"".join([name.encode("ascii"), b"=", raw, b"\\n"])''',
+     ["test_a_field_containing_a_newline_cannot_impersonate_another_field",
+      "test_the_canonical_bytes_are_the_documented_shape"]),
+
+    # What `--bytes` prints must be what was hashed, or the published
+    # canonicalisation is decoration and nobody can recompute one by hand.
+    ("chain-bytes-prints-something-else-than-what-was-hashed", "bevis/cli.py",
+     '''    return chain.row_bytes(row, row["prev_hash"] or chain.GENESIS_PREV)''',
+     '''    return chain.row_bytes(row, chain.GENESIS_PREV)''',
+     ["test_the_printed_canonical_bytes_hash_to_the_stored_hash"]),
+
+    # ── Where the chain begins, and saying so ───────────────────────────────
+    ("chain-never-started-on-a-new-board", "bevis/db.py",
+     '''            begun = chain.start_chain(conn)''',
+     '''            begun = None''',
+     ["test_a_fresh_board_records_that_its_chain_started_from_nothing",
+      "test_adopting_a_board_that_already_had_events_seals_them_and_says_so"]),
+
+    ("chain-start-not-recorded-in-the-log", "bevis/db.py",
+     '''            if begun is not None:''',
+     '''            if False:''',
+     ["test_a_fresh_board_records_that_its_chain_started_from_nothing",
+      "test_adopting_a_board_that_already_had_events_seals_them_and_says_so"]),
+
+    # An adopted board sealed rows it cannot vouch for the history of. Calling
+    # that `fresh` is the provenance hole the record exists to close.
+    ("chain-adoption-claims-the-old-rows-were-hashed-when-written", "bevis/chain.py",
+     '''    mode = MODE_ADOPTED if rows else MODE_FRESH''',
+     '''    mode = MODE_FRESH''',
+     ["test_adopting_a_board_that_already_had_events_seals_them_and_says_so"]),
+
+    # Re-sealing an existing chain would turn every planted edit into a clean
+    # chain and call it a migration.
+    ("chain-init-re-seals-an-existing-chain", "bevis/chain.py",
+     '''    if get_meta(conn, META_STARTED_AT) is not None:
+        return None''',
+     '''    if False:
+        return None''',
+     ["test_init_does_not_launder_a_tamper",
+      "test_running_init_twice_does_not_restart_the_chain"]),
+
+    ("chain-not-verified-by-doctor", "bevis/doctor.py",
+     '''            check_chain(conn, results)''',
+     '''            pass''',
+     ["test_doctor_fails_when_the_event_log_has_been_edited",
+      "test_doctor_reports_the_chain_it_actually_verified"]),
 ]
 
 IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc",

@@ -29,7 +29,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import __version__, adapters, core
+from . import __version__, adapters, chain, core
 from .db import connect
 from .dispatch import adapter_env, render_adapter
 from .errors import BevisError
@@ -150,6 +150,30 @@ def check_board(conn, results: list) -> None:
             "--cmd <command> --blocking`"))
 
 
+def check_chain(conn, results: list) -> None:
+    """Verify the event log's hash chain, here, now, for real.
+
+    doctor is the command you type when you do not know what is wrong, and "the
+    audit trail has been edited" is the most important thing that can be wrong
+    with a board. It is cheap — a sha256 per event over a few hundred bytes — so
+    there is no argument for making the user remember a second command.
+
+    This is an `ok` doctor is allowed to print, because it ran the check. It is
+    not a green tick for something that was merely looked at.
+    """
+    report = chain.verify(conn)
+    if report["ok"]:
+        results.append(_result(
+            "chain", OK, "event log hash chain intact — %d event(s), head at "
+            "event %s" % (report["verified"], report["head_id"])))
+        return
+    problem = report["problem"]
+    results.append(_result(
+        "chain", FAIL, problem["detail"],
+        problem["fix"] if problem["kind"] == "no-chain" else
+        "%s — run `bevis check --chain` for the whole report" % problem["fix"]))
+
+
 def _executable_problem(cmd: str):
     """Can this command line actually start? (detail, fix) or None."""
     program = adapters.program_of(cmd)
@@ -265,6 +289,7 @@ def diagnose(db_path, probe_name=None, timeout=PROBE_TIMEOUT) -> list:
     check_actor(results)
     if conn is not None:
         try:
+            check_chain(conn, results)
             check_board(conn, results)
             # A board with no adapter table has already been reported, with the
             # one command that fixes it. Reading the registry now would only add

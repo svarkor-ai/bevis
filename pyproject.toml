@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bevis"
-version = "0.2.1"
+version = "0.3.0"
 description = "A job board where a job cannot close without machine-checkable evidence."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -308,6 +308,8 @@ database
   ok       /tmp/bevis-readme-check/bevis-quickstart/.bevis/bevis.db — 0 job(s), 0 ready
 actor
   ok       $BEVIS_ACTOR=you — closes will be recorded under that name
+chain
+  ok       event log hash chain intact — 2 event(s), head at event 2
 adapters
   ok       myagent — ran and exited 0: ready (a probe does no work)
 
@@ -371,6 +373,102 @@ wanted to — `tests/test_no_dependencies.py` reads the imports with `ast` and
 fails the build if that stops being true. `bevis adapter list` shows what is
 registered; `bevis adapter remove myagent` forgets it.
 
+## The log notices being edited
+
+Everything above is about getting an honest record written down. This is about
+the record still being the one that was written.
+
+Every row in the event log carries the hash of the row before it — `sha256` over
+that row's fields and its predecessor's hash. Edit a historical row and it stops
+matching its own hash; delete one and the next row stops following the one
+before it. `bevis check --chain` walks the log and names the **first** place the
+arithmetic fails, because "invalid" is not an answer anybody can act on.
+
+```console
+$ export BEVIS_ACTOR=alice
+$ bevis check --chain | sed -E 's/[0-9a-f]{64}/<sha256>/g; s/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/<timestamp>/'
+chain ok — 22 event(s), unbroken from event 1 to event 22
+format     sha256 over bevis-event-v1, each event hashing the one before it
+head       <sha256> (event 22)
+started    fresh <timestamp> — every event on this board was hashed as it was written
+anchor     the chain sits in the same file as the log, so copy that head hash somewhere else; a rewrite of everything is only detectable against a copy kept outside
+```
+
+The chain is arithmetic, not a promise, so you can redo it. `--bytes` prints the
+exact bytes one event's hash was taken over — every field length-prefixed,
+nothing summarised, nothing pretty-printed:
+
+```console
+$ bevis check --chain --bytes 1 | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/<timestamp>/'
+bevis-event-v1
+prev=64:0000000000000000000000000000000000000000000000000000000000000000
+id=1:1
+ts=27:<timestamp>
+job_id=0:
+actor=5:alice
+kind=13:chain_started
+detail=98:bevis-event-v1/sha256; this board had no events, so every event in it was hashed as it was written
+```
+
+That is the whole input. Hand it to a hasher that has never heard of bevis, read
+the stored hash straight out of the file with `sqlite3`, and compare:
+
+```console
+$ bevis check --chain --bytes 1 | sha256sum | cut -d' ' -f1 > recomputed
+$ python -c "import sqlite3; print(sqlite3.connect('.bevis/bevis.db').execute('SELECT hash FROM event WHERE id=1').fetchone()[0])" > recorded
+$ diff recomputed recorded && echo "recomputed by hand: identical"
+recomputed by hand: identical
+```
+
+Now edit the log the way somebody would if they wanted a job's history to say
+something else — straight at the file, with bevis nowhere in sight:
+
+```console
+$ python -c "import sqlite3; c = sqlite3.connect('.bevis/bevis.db'); c.execute('UPDATE event SET detail=? WHERE id=3', ('nothing happened here',)); c.commit()"
+$ bevis check --chain | sed -E 's/[0-9a-f]{64}/<sha256>/g; s/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/<timestamp>/'
+chain BROKEN at event 3 — event 3 no longer matches its own hash: recorded <sha256>, recomputed <sha256>
+-> this row's ts, job_id, actor, kind or detail was edited after it was written; bevis can say it changed, not what it used to say
+events 1-2 verify clean; nothing after that is proved.
+format     sha256 over bevis-event-v1, each event hashing the one before it
+head       <sha256> (event 22)
+started    fresh <timestamp> — every event on this board was hashed as it was written
+anchor     the chain sits in the same file as the log, so copy that head hash somewhere else; a rewrite of everything is only detectable against a copy kept outside
+$ bevis check --chain > /dev/null; echo $?
+1
+```
+
+It exits non-zero, so a broken chain can fail a build, a cron job, or a blocking
+check on a job of its own. The row really was changed: bevis could not stop that
+and does not pretend to — it is a SQLite file and you own it. What it can say is
+*which* row, and that everything before that row still adds up.
+
+Four things that gate is honest about:
+
+* **It is tamper-evident, not tamper-proof.** The chain lives in the same file
+  as the log it protects, so somebody who holds the board and knows the format
+  can rewrite every row, recompute every hash, and move the recorded head to
+  match. What is gone is the cheap version — one `UPDATE`, invisible afterwards.
+  Copy that head hash somewhere else and a full rewrite stops being undetectable
+  too; that is why the checker prints it.
+* **Cutting events off the end is caught by the head, not by the chain, and
+  only until the next append.** A chain says nothing about a row that is no
+  longer there — lop the last three events off and what remains verifies
+  perfectly. bevis writes the head id and hash beside the log on every append,
+  and that is what notices. But SQLite hands a deleted row's id straight back to
+  the next insert, so once bevis appends again the new event links correctly to
+  the one before it and the recorded head moves on: the trace is gone. Checking
+  the chain regularly, and against a head hash you kept elsewhere, is what
+  closes that window — not anything bevis does on its own.
+* **Starting the chain on a board that already has events is recorded as
+  exactly that.** Those rows are sealed as they stand at that moment, and
+  `bevis check --chain` says `adopted` rather than `fresh` from then on:
+  unchanged-since-adoption is provable, unchanged-since-written is not, and a
+  chain that began at an unrecorded point would be a provenance claim with a
+  hole in it.
+* **There is no signature.** A signing key would be a secret bevis holds, and a
+  tool whose selling point is that it has no field for your credentials does not
+  get to grow one for its own.
+
 ## Install
 
 ```sh
@@ -385,6 +483,15 @@ so no API token exists to be leaked or rotated. Or from a checkout:
 pip install -e .
 pip install -e '.[api]'
 ```
+
+**Upgrading to 0.3.0.** Run `bevis init` once against an existing board — the
+same idempotent command — and it starts the event log's hash chain. On a board
+that already has events those rows are hashed as they stand at that moment, and
+the board records that it *adopted* a chain rather than started one, because
+sealing proves unchanged-since-adoption and not unchanged-since-written. A
+started chain is never restarted, so running `bevis init` again cannot re-seal a
+log somebody has edited. Until you run it once, everything works exactly as
+before and `bevis check --chain` reports the board rather than a row.
 
 **Upgrading from 0.1.x.** Run `bevis init` once against an existing board: it is
 idempotent, it adds the three columns a negative control is stored in, and it
@@ -497,10 +604,28 @@ Read this before adopting bevis. None of it is throat-clearing.
   add`, so the dispatcher's closes are covered by the vacuity rule and nothing
   else. bevis records what you chose to measure and has no opinion about whether
   it measures the right thing.
-* **The event log is not tamper-evident.** No hash chain, no signatures. Anyone
-  with write access to the SQLite file can rewrite history, and the evidence a
-  job carries is a recorded string, not a signed artefact. bevis raises the
-  effort; it is not a compliance artefact.
+* **The event log is tamper-evident, not tamper-proof.** This used to say there
+  was no hash chain at all. There is one now: every event carries the hash of
+  the one before it, and `bevis check --chain` detects and *locates* an edited
+  row, a deleted row, a hand-inserted row and a truncated tail. What remains
+  conceded is the part a hash chain cannot do on its own. The chain sits in the
+  same file as the log, so somebody who holds the board and knows the format can
+  rewrite every row, recompute every hash and move the recorded head to match —
+  there is no signature and no external anchor, because a signing key would be a
+  secret bevis holds. Keeping a copy of the head hash somewhere else is what
+  closes that, and it is a thing you do, not a thing bevis does. The evidence a
+  job carries is still a recorded string rather than a signed artefact, and this
+  is still not a compliance artefact.
+* **The chain covers the event log, not the evidence columns.** The event that
+  recorded a close is hashed; `job.verify_output` is not. Somebody editing the
+  stored output of a closed job breaks nothing the chain can see. The narrative
+  is sealed; the columns it describes are not.
+* **A chain nobody verifies proves nothing.** `bevis check --chain` and `bevis
+  doctor` are commands somebody has to run — in CI, on a schedule, or as a
+  blocking check on a job of its own. Nothing on the write path refuses to
+  append to a chain that is already broken: verifying on every append would cost
+  a walk of the whole log per event, and refusing to record anything would mean
+  the tool destroying its audit trail exactly when it mattered most.
 * **Slot exclusivity is argued from the code, not proved by the tests.** The
   atomic claim is `BEGIN IMMEDIATE` plus a status-guarded `UPDATE`, and a test
   compares recorded run intervals — but removing the atomicity usually still

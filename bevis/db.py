@@ -14,11 +14,12 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
+from . import chain
 from .errors import NotFound, UsageError
 
 DEFAULT_DIR = ".bevis"
 DEFAULT_FILE = "bevis.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job (
@@ -90,13 +91,22 @@ CREATE TABLE IF NOT EXISTS job_run (
 
 -- Append-only audit trail. Nothing reads it to make a decision; it exists so a
 -- human can reconstruct how a job reached its status.
+--
+-- prev_hash/hash are the chain: hash = sha256(prev_hash + this row, canonically
+-- encoded), so editing a row breaks its own hash and deleting one breaks the
+-- next row's link. The exact bytes are documented in bevis/chain.py, and
+-- `bevis check --chain` names the first row where the arithmetic fails. Nothing
+-- enforces this in a trigger: like every other rule here it lives in Python, so
+-- you can read it.
 CREATE TABLE IF NOT EXISTS event (
-  id      INTEGER PRIMARY KEY,
-  ts      TEXT    NOT NULL,
-  job_id  INTEGER,
-  actor   TEXT    NOT NULL DEFAULT '',
-  kind    TEXT    NOT NULL,
-  detail  TEXT    NOT NULL DEFAULT ''
+  id        INTEGER PRIMARY KEY,
+  ts        TEXT    NOT NULL,
+  job_id    INTEGER,
+  actor     TEXT    NOT NULL DEFAULT '',
+  kind      TEXT    NOT NULL,
+  detail    TEXT    NOT NULL DEFAULT '',
+  prev_hash TEXT,
+  hash      TEXT
 );
 
 -- Named adapters: a NAME for a command line, so `bevis run --adapter myagent`
@@ -130,6 +140,8 @@ MIGRATIONS = (
     ("job", "control_cmd", "TEXT"),
     ("job", "control_exit", "INTEGER"),
     ("job", "control_output", "TEXT"),
+    ("event", "prev_hash", "TEXT"),
+    ("event", "hash", "TEXT"),
 )
 
 
@@ -149,6 +161,11 @@ def has_negative_control(conn: sqlite3.Connection) -> bool:
     the columns without touching a job, so the fix is one command.
     """
     return "control_cmd" in columns(conn, "job")
+
+
+def has_chain(conn: sqlite3.Connection) -> bool:
+    """Can this board hash-chain its event log? False on a board from 0.2.x."""
+    return chain.has_chain(conn)
 
 
 def migrate(conn: sqlite3.Connection) -> List[str]:
@@ -207,20 +224,41 @@ def connect(path, create: bool = False) -> sqlite3.Connection:
 
 
 def init_db(path) -> Path:
-    """Create the schema. Idempotent — running init twice is not an error."""
+    """Create the schema. Idempotent — running init twice is not an error.
+
+    The whole of it is one transaction, because the second half is not schema:
+    it starts the hash chain, and a board left with sealed rows but no record of
+    WHEN they were sealed would be a provenance claim with a hole in it. Either
+    both land or neither does.
+    """
     path = Path(path)
     conn = connect(path, create=True)
     try:
-        conn.executescript(SCHEMA)
-        # CREATE TABLE IF NOT EXISTS does nothing to a table that already
-        # exists, so a board from an older bevis needs its new columns added
-        # explicitly. This is why `bevis init` is worth running again.
-        migrate(conn)
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
+        conn.executescript(SCHEMA)      # implicitly commits; must precede BEGIN
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # CREATE TABLE IF NOT EXISTS does nothing to a table that already
+            # exists, so a board from an older bevis needs its new columns added
+            # explicitly. This is why `bevis init` is worth running again.
+            migrate(conn)
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
+            begun = chain.start_chain(conn)
+            if begun is not None:
+                # Written as an ordinary event, so the record of where the chain
+                # began is itself inside the chain. Deferred import: core reads
+                # this module, and the actor is core's answer to "who is this".
+                from .core import default_actor
+
+                log_event(conn, None, default_actor(), chain.GENESIS_KIND,
+                          begun["detail"])
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
     return path
@@ -278,9 +316,47 @@ def get_job(conn: sqlite3.Connection, raw) -> sqlite3.Row:
 
 
 def log_event(conn: sqlite3.Connection, job_id, actor: str, kind: str, detail: str = "") -> None:
+    """Append one event, hashed onto the end of the chain.
+
+    This is the only place bevis inserts into `event`, which is what lets the
+    chain be a property of the table rather than a habit of the callers: there
+    is no second writer to forget.
+
+    The id is part of what is hashed and SQLite assigns it, so the row is
+    inserted and then stamped. Both statements plus the head bookmark run inside
+    one write transaction — our own when the caller does not already hold one,
+    the caller's when it does (the dispatcher claims a job and logs it under a
+    single `BEGIN IMMEDIATE`). Without that, two slots appending at once could
+    read the same predecessor and produce a fork that reads exactly like a
+    tamper.
+    """
     from .model import now_ts
 
-    conn.execute(
-        "INSERT INTO event (ts, job_id, actor, kind, detail) VALUES (?,?,?,?,?)",
-        (now_ts(), job_id, actor or "", kind, detail or ""),
-    )
+    ts, actor, detail = now_ts(), actor or "", detail or ""
+    if not has_chain(conn):
+        # A board from an older bevis has nowhere to put a hash. The event still
+        # goes in: dropping the audit trail to protect a chain that does not
+        # exist yet would be the wrong trade, and `bevis check --chain` names
+        # the board rather than the row.
+        conn.execute(
+            "INSERT INTO event (ts, job_id, actor, kind, detail) VALUES (?,?,?,?,?)",
+            (ts, job_id, actor, kind, detail))
+        return
+    own_txn = not conn.in_transaction
+    if own_txn:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        prev = chain.head_hash(conn)
+        cur = conn.execute(
+            "INSERT INTO event (ts, job_id, actor, kind, detail, prev_hash) "
+            "VALUES (?,?,?,?,?,?)", (ts, job_id, actor, kind, detail, prev))
+        event_id = int(cur.lastrowid)
+        digest = chain.event_hash(prev, event_id, ts, job_id, actor, kind, detail)
+        conn.execute("UPDATE event SET hash=? WHERE id=?", (digest, event_id))
+        chain.set_head(conn, event_id, digest)
+        if own_txn:
+            conn.execute("COMMIT")
+    except Exception:
+        if own_txn:
+            conn.execute("ROLLBACK")
+        raise

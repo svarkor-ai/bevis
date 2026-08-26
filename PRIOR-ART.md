@@ -58,7 +58,7 @@ without the evidence attached.
 | **pi-tasks** (published by `nczz`, MIT) | "Pi-native execution contracts for AI agents — evidence-gated completion, ordered plans, and compaction-safe resume". | Ships bevis's core invariant already, inside the Pi runtime: "Agents cannot mark work done without traceable, reproducible proof", and `task_complete` rejects when "No evidence exists" or "All evidence is only `not_verified`". It also solves something bevis ignores — surviving context compaction, with resume on `session_start`. | It is bound to the Pi agent runtime and its evidence is artifact references; whether a command and exit code are captured automatically is **UNVERIFIED** (the page does not say). bevis is runtime-agnostic, calls no model, and shells out to any command. | [pi.dev/packages/pi-tasks](https://pi.dev/packages/pi-tasks) |
 | **Task Master** (`eyaltoledano/claude-task-master`) | "A task management system for AI-driven development with Claude" — parses a PRD into a decomposed task tree. | Decomposition is its whole craft, and it is enormously more popular. If your problem is "turn this spec into a sensible ordered task list", this is the tool. | Licence is **MIT with Commons Clause**, which is not OSI-open: "Not Allowed: Sell Task Master itself, Offer Task Master as a hosted service, Create competing products based on Task Master". No acceptance-bar-on-close mechanism appears in the README I read. bevis is plain Apache-2.0. | [repo](https://github.com/eyaltoledano/claude-task-master) |
 | **OpenHands** (`All-Hands-AI/OpenHands`, MIT) | "The self-hosted developer control center for coding agents and automations" — "Run OpenHands, Claude Code, Codex, Gemini, or any ACP-compatible agent across local, remote, and cloud backends." | It is the thing that does the work. Sandboxes, runtimes, a UI, integrations, and years of engineering. bevis is not in this category and should not be compared on it. | It is a worker, not a ledger: no durable acceptance-gated job record documented in the README I read. bevis is a sane thing to put *in front of* OpenHands — it can dispatch to it and refuse to close on its say-so. | [repo](https://github.com/All-Hands-AI/OpenHands) |
-| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested`, which "checks command, arguments, working directory, exit code, and output digest when execution is required", and `ProducerAuthorized`, which "checks that the actor, lane, host/session, or signing key is authorized for the claim" — both strictly stronger than what bevis stores. If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file (`pip install bevis`), with a much thinner notion of evidence (no freshness binding, no signatures, no tamper-evidence). | [arXiv](https://arxiv.org/abs/2607.14890) |
+| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested`, which "checks command, arguments, working directory, exit code, and output digest when execution is required", and `ProducerAuthorized`, which "checks that the actor, lane, host/session, or signing key is authorized for the claim" — both strictly stronger than what bevis stores. If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file (`pip install bevis`), with a much thinner notion of evidence (no freshness binding, no signatures, and tamper-evidence only in the weak sense of a hash chain kept in the same file as the log). | [arXiv](https://arxiv.org/abs/2607.14890) |
 
 ---
 
@@ -104,10 +104,14 @@ reimplement a data platform on top of a job table.
 
 **…you want evidence an auditor can verify without trusting you.** Use
 [Assay](https://github.com/Rul1an/assay) or
-[Evidence Gate](https://github.com/evidence-gate/evidence-gate-action). Tamper-evident bundles,
-hash chains, trust levels, SARIF into GitHub's Security tab. bevis records a command, an exit
-code and its output in a local SQLite file. That is enough to stop a job closing on a claim; it
-is **not** cryptographic proof and it is not a compliance artifact.
+[Evidence Gate](https://github.com/evidence-gate/evidence-gate-action). Offline-verifiable
+bundles, trust levels, SARIF into GitHub's Security tab. bevis records a command, an exit code
+and its output in a local SQLite file, and hash-chains the event log around them — so an edited,
+deleted, inserted or truncated event is detected and located. That is enough to stop a job
+closing on a claim and to notice the log being edited afterwards. It is still **not**
+cryptographic proof: the chain sits in the same file it protects, nothing is signed, and an
+auditor checking it is trusting you not to have rewritten the whole thing. It is not a
+compliance artifact.
 
 **…you already run one of these and it works.** Then you have solved the problem bevis exists
 for. Nothing here justifies a second system.
@@ -187,12 +191,17 @@ belong on this page; that is the same standard bevis holds a job to.
 | 7 | No credential, endpoint or model of yours inside bevis | `bevis.adapters`, the `adapter` table | `test_the_registry_stores_only_a_name_and_a_command`, `test_registering_an_inline_credential_is_refused`, `test_the_shapes_a_pasted_secret_takes_are_refused`, `test_a_secret_referenced_from_the_environment_is_not_a_secret` | `registry-stores-a-pasted-credential`, `credential-lint-refuses-an-environment-reference` |
 | 8 | Evidence that measured nothing is refused, and real output never is | `core.vacuity_problem`, `core.close_job` | `test_output_that_measured_nothing_is_vacuous`, `test_real_passing_output_is_never_called_vacuous`, `test_a_log_that_measured_something_is_not_vacuous`, `test_close_with_vacuous_output_is_refused`, `test_the_dispatcher_cannot_close_on_a_check_that_measured_nothing` | `vacuous-output-accepted`, `vacuity-refuses-a-log-that-measured-something`, `vacuity-needle-matches-a-bigger-number` |
 | 9 | A negative control that also passes refuses the close | `core.close_by_running`, `core._control_refusal` | `test_a_control_that_also_passes_is_refused`, `test_the_same_close_succeeds_once_the_checker_can_fail`, `test_a_control_that_never_ran_is_not_a_control_that_failed`, `test_the_control_is_actually_run_not_merely_recorded`, `test_the_control_is_not_told_that_it_is_the_control` | `control-that-also-passed-is-accepted`, `control-that-never-ran-counts-as-a-failure`, `control-command-never-actually-run`, `negative-control-accepted-without-run` |
+| 10 | An edited, deleted, inserted or truncated event is detected and located | `bevis.chain`, `db.log_event` | `test_a_planted_edit_to_a_historical_row_is_detected_and_named`, `test_a_deleted_event_is_detected_at_the_next_link`, `test_a_hand_inserted_event_is_detected_as_unchained`, `test_events_cut_off_the_end_are_detected_by_the_recorded_head`, `test_an_untouched_log_verifies_clean`, `test_the_printed_canonical_bytes_hash_to_the_stored_hash` | `chain-edited-row-passes-verification`, `chain-deleted-row-passes-verification`, `chain-unhashed-row-passes-verification`, `chain-truncated-log-passes-verification`, `chain-verification-refuses-an-untouched-log`, `chain-canonical-form-drops-the-length-prefix` |
+| 11 | The chain begins at a point the board records, and is never silently restarted | `chain.start_chain`, `db.init_db` | `test_a_fresh_board_records_that_its_chain_started_from_nothing`, `test_adopting_a_board_that_already_had_events_seals_them_and_says_so`, `test_init_does_not_launder_a_tamper` | `chain-never-started-on-a-new-board`, `chain-start-not-recorded-in-the-log`, `chain-adoption-claims-the-old-rows-were-hashed-when-written`, `chain-init-re-seals-an-existing-chain` |
 
-Three things the table deliberately does not launder. Claim 4's atomic claim — one job per
+Four things the table deliberately does not launder. Claim 4's atomic claim — one job per
 slot, ever — has a test that compares recorded run intervals, but **no mutant**: remove
 the atomicity and the suite usually still passes, because the race rarely loses. Claim 8's
 phrase list is a phrase list: it catches ten shapes and is blind to a domain counter that
-is simply wrong, and claim 9 only fires on the closes where somebody asked for it. And the
+is simply wrong, and claim 9 only fires on the closes where somebody asked for it. Claim 10
+says *detected*, not *prevented*, and it covers the event log rather than the `verify_output`
+column beside it — a chain in the same file as the log it protects is evidence against an edit,
+not against a rewrite by somebody who holds the file. And the
 `test_docs_claims.py` suite asserts that every test named in this file exists, so this
 table cannot quietly rot into a list of names that no longer resolve; it cannot tell you
 whether the test still *means* what the row says.
@@ -210,9 +219,12 @@ whether the test still *means* what the row says.
 - **Not distributed.** Single node, one SQLite file. No clustering, no HA, no multi-region.
   Concurrency is bounded by what one machine and one SQLite file can do.
 - **Not cryptographic proof.** Evidence is a recorded command, exit code and output in a local
-  database. It is not signed, not content-addressed, not tamper-evident, and not a compliance
-  artifact. Anyone with write access to the file can edit it. Assay and Evidence Gate take that
-  problem seriously; bevis does not.
+  database. As of 0.3.0 the event log is hash-chained, so an edit to a historical event, a
+  deleted event, a hand-inserted one or a truncated tail is detected and named. That is
+  tamper-EVIDENT and no more: nothing is signed, the chain lives in the same file as the log,
+  and anyone who holds the file and knows the format can rewrite all of it and recompute every
+  hash. Assay and Evidence Gate carry offline-verifiable, externally anchored evidence; bevis
+  does not, and a compliance artifact this is not.
 - **Not a claim to have invented the idea.** See below.
 
 ---
