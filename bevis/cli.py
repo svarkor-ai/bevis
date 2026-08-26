@@ -66,6 +66,14 @@ def print_job(job: dict, conn) -> None:
         print("  verify_output:")
         for line in (job.get("verify_output") or "").splitlines():
             print("    | %s" % line)
+        if job.get("control_cmd"):
+            print("  negative control:")
+            print("    cmd    %s" % job["control_cmd"])
+            print("    exit   %s" % job["control_exit"])
+            if (job.get("control_output") or "").strip():
+                print("    output:")
+                for line in (job.get("control_output") or "").splitlines():
+                    print("      | %s" % line)
     else:
         print("  none — this job has not been closed")
     if job.get("verified_by"):
@@ -137,6 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verify-exit", type=int, help="evidence produced elsewhere: exit code")
     p.add_argument("--verify-output-file",
                    help="evidence produced elsewhere: file with the output ('-' = stdin)")
+    p.add_argument("--negative-control", dest="negative_control",
+                   help="a command that MUST fail. bevis runs it as well and "
+                        "refuses the close if it passes too, because a check that "
+                        "passes either way checks nothing (use with --run)")
     p.add_argument("--timeout", type=int, default=core.DEFAULT_TIMEOUT)
     p.add_argument("--actor", default="")
 
@@ -301,13 +313,28 @@ def run_command_line(args, db_path) -> int:
                 if args.verify_cmd or args.verify_exit is not None or args.verify_output_file:
                     raise BevisError("use either --run or the --verify-* trio, not both")
                 job = core.close_by_running(conn, args.id, args.run_cmd,
-                                            timeout=args.timeout, actor=args.actor)
+                                            timeout=args.timeout, actor=args.actor,
+                                            negative_control=args.negative_control)
             else:
+                if args.negative_control:
+                    # The control is only worth anything because bevis watched it
+                    # fail. Pairing an observed control with a transcribed
+                    # verification would let the strong half launder the weak one.
+                    raise BevisError(
+                        "--negative-control needs --run: bevis has to run the "
+                        "control itself for its failure to mean anything, and the "
+                        "--verify-* form is evidence produced somewhere bevis "
+                        "cannot see. Run the control where the work is, or make "
+                        "--verify-cmd the command that runs both.")
                 job = core.close_job(
                     conn, args.id, args.verify_cmd, args.verify_exit,
                     _read_output_file(args.verify_output_file), actor=args.actor)
-            emit(job, as_json, "closed job %s with evidence (exit %s from: %s)"
-                 % (job["display_id"], job["verify_exit"], job["verify_cmd"]))
+            plain = ("closed job %s with evidence (exit %s from: %s)"
+                     % (job["display_id"], job["verify_exit"], job["verify_cmd"]))
+            if job.get("control_cmd"):
+                plain += ("\nnegative control exited %s, as a control must: %s"
+                          % (job["control_exit"], job["control_cmd"]))
+            emit(job, as_json, plain)
 
         elif args.command == "verify":
             job = core.verify_job(conn, args.id, args.actor, note=args.note)

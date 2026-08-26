@@ -52,9 +52,17 @@ case you know should fail — a planted defect, a needle you put there yourself 
 fails. Give it a case you know should pass and confirm that too. A checker that has never been shown
 to catch anything is not a checker.
 
-**In bevis.** This one bevis cannot enforce. It runs whatever command a job names and trusts the exit
-code completely — which is exactly why this rule matters most for anyone using it. A bevis job is
-only as honest as the check attached to it.
+**In bevis.** This used to say bevis could not enforce it. Half of it, it now can. `bevis close 3
+--run "<command>" --negative-control "<a case that must fail>"` runs both commands and requires both
+answers: the verification passed AND the control did not. A control that passes too is a refusal,
+because a command that reports success either way is a constant rather than a check — and a control
+that exits 126 or 127 is refused as well, since a command the shell could not start has been shown
+not to exist rather than shown to fail. Separately and by default, bevis refuses a close whose output
+says in its own words that it examined nothing: a runner that ran 0 tests, a scan handed no files.
+What bevis still cannot do is supply the failing case for you. A control bevis invented would be
+exactly the fake check this rule is about, so the second direction is a flag somebody has to
+remember. A bevis job is only as honest as the check attached to it; it can now be made to prove
+that check was capable of saying no.
 
 ## 3. "Green" is not evidence — assert the domain state
 
@@ -114,7 +122,9 @@ trusting an armed switch, read its own code for words like "would," "not yet," "
 **In bevis.** The same discipline, structurally: closing a job is not "the capability is switched
 on," it is one specific command that ran, at a specific time, with a specific exit code, whose
 output is kept. A capability that has never actually run under bevis has produced no evidence and
-cannot close anything.
+cannot close anything. The "force a case that must change something" half of this rule is what
+`--negative-control` mechanises (rule 2): a stub that logs what it would do passes the clean run and
+passes the planted one too, and bevis refuses a close where both came back the same.
 
 ## 6. An agent asked to grade its own work will pass itself
 

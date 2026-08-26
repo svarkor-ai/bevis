@@ -12,13 +12,13 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .errors import NotFound, UsageError
 
 DEFAULT_DIR = ".bevis"
 DEFAULT_FILE = "bevis.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job (
@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS job (
   verify_cmd    TEXT,
   verify_exit   INTEGER,
   verify_output TEXT,
+  -- The negative control, when one was run: a command that had to FAIL for the
+  -- evidence above to mean anything. Optional, because bevis cannot invent one.
+  control_cmd    TEXT,
+  control_exit   INTEGER,
+  control_output TEXT,
   -- Provenance of the state changes that matter.
   claimed_by     TEXT,
   claimed_at     TEXT,
@@ -118,6 +123,44 @@ CREATE INDEX IF NOT EXISTS idx_event_job   ON event(job_id, id);
 """
 
 
+#: Columns added after a release, for boards that already exist. Additive only:
+#: nothing here drops, renames or rewrites anything, so applying it to a current
+#: board is a no-op and applying it to an old one cannot lose evidence.
+MIGRATIONS = (
+    ("job", "control_cmd", "TEXT"),
+    ("job", "control_exit", "INTEGER"),
+    ("job", "control_output", "TEXT"),
+)
+
+
+def columns(conn: sqlite3.Connection, table: str) -> set:
+    """The column names a table actually has, asked of the file.
+
+    A fact about the database is read from the database, never inferred from
+    catching an exception raised somewhere down the line.
+    """
+    return {row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+
+
+def has_negative_control(conn: sqlite3.Connection) -> bool:
+    """Can this board store a negative control at all?
+
+    False on a board created by bevis 0.1.x. `bevis init` is idempotent and adds
+    the columns without touching a job, so the fix is one command.
+    """
+    return "control_cmd" in columns(conn, "job")
+
+
+def migrate(conn: sqlite3.Connection) -> List[str]:
+    """Bring an older board up to the current schema. Returns what it added."""
+    added = []
+    for table, column, decl in MIGRATIONS:
+        if column not in columns(conn, table):
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, decl))
+            added.append("%s.%s" % (table, column))
+    return added
+
+
 def resolve_db_path(explicit: Optional[str] = None) -> Path:
     """--db beats $BEVIS_DB beats the nearest .bevis/bevis.db walking upward.
 
@@ -169,6 +212,10 @@ def init_db(path) -> Path:
     conn = connect(path, create=True)
     try:
         conn.executescript(SCHEMA)
+        # CREATE TABLE IF NOT EXISTS does nothing to a table that already
+        # exists, so a board from an older bevis needs its new columns added
+        # explicitly. This is why `bevis init` is worth running again.
+        migrate(conn)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

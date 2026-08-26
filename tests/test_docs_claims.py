@@ -8,6 +8,10 @@ the build tells you which document now lies.
 It checks that the names resolve. It cannot check that a test still *means* what
 the row says it means — that is a human's job, and the row is a pointer to the
 place where the reading happens.
+
+One narrow exemption, stated here because an unexplained exemption is a hole: a
+name the document DEFINES (`def test_something`) is the document building an
+example, not citing this repository's suite. Everything else counts.
 """
 from __future__ import annotations
 
@@ -25,6 +29,12 @@ DOCS = [ROOT / "README.md", ROOT / "PRIOR-ART.md", ROOT / "DOCTRINE.md",
 
 #: A test name mentioned in prose, but not a filename like test_docs_claims.py.
 TEST_NAME_RE = re.compile(r"\btest_[a-z0-9_]+\b(?!\.py)")
+
+#: A name a document DEFINES is not a name it cites. README.md's worked example
+#: writes a throwaway test file, and `def test_addition` in that transcript is
+#: the example being built, not a claim about this repository's suite. Nothing
+#: else is exempt: a name mentioned any other way is still a citation.
+DEFINITION_RE = re.compile(r"\bdef\s+test_[a-z0-9_]+")
 MUTANT_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+$")
 
 
@@ -50,7 +60,8 @@ def mutant_names() -> set:
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.name)
 def test_every_test_named_in_the_docs_exists(doc):
     known = collected_test_names()
-    cited = set(TEST_NAME_RE.findall(doc.read_text(encoding="utf-8")))
+    text = DEFINITION_RE.sub("", doc.read_text(encoding="utf-8"))
+    cited = set(TEST_NAME_RE.findall(text))
     missing = sorted(cited - known)
     assert not missing, (
         "%s names %d test(s) that do not exist: %s"

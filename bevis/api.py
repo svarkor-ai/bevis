@@ -129,7 +129,15 @@ def create_app(db_path):
             return core.close_by_running(conn, ref, body["run"],
                                          timeout=int(body.get("timeout",
                                                               core.DEFAULT_TIMEOUT)),
-                                         actor=body.get("actor", ""))
+                                         actor=body.get("actor", ""),
+                                         negative_control=body.get("negative_control"))
+        if body.get("negative_control"):
+            # Same rule as the CLI, and the same reason: bevis has to have run
+            # the control itself for its failure to be worth anything.
+            raise UsageError(
+                "negative_control needs run: bevis has to run the control itself "
+                "for its failure to mean anything, and verify_cmd/verify_exit is "
+                "evidence produced somewhere bevis cannot see.")
         return core.close_job(conn, ref, body.get("verify_cmd"),
                               body.get("verify_exit"), body.get("verify_output"),
                               actor=body.get("actor", ""))

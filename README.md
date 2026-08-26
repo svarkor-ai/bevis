@@ -11,18 +11,21 @@ can read it.
 
 *bevis* is Swedish for "proof".
 
-## The idea, in five lines
+## The idea, in six lines
 
 1. A job cannot be closed without a command, its exit code and its output —
    stored, not asserted.
-2. The acceptance bar is written when the job is created, before anyone has a
+2. A command that reports success whether or not the work was done is not
+   evidence. bevis refuses a close whose output says it measured nothing, and
+   will run a negative control beside your verification if you give it one.
+3. The acceptance bar is written when the job is created, before anyone has a
    reason to make it easy to pass. A job with no bar cannot be created.
-3. Closing a job and verifying it are two different acts, and bevis will not let
+4. Closing a job and verifying it are two different acts, and bevis will not let
    the same actor perform both.
-4. A dispatcher can claim jobs and hand them to any agent or script, and records
+5. A dispatcher can claim jobs and hand them to any agent or script, and records
    what came back — it never decides whether that counts as success. Only the
    job's own checks do.
-5. Nothing in that loop calls a language model, because the thing under test is
+6. Nothing in that loop calls a language model, because the thing under test is
    whether a claim of success is true.
 
 ## Sixty seconds
@@ -139,6 +142,121 @@ pick the job up again. A job that could not be proved is a job a human should
 look at, and a queue that silently retries it forever is how one broken step
 burns a night of compute. Every blocked reason ends with the command that
 requeues it.
+
+## A check that cannot fail
+
+`--cmd true` always passes. So does a test runner that found no tests, a
+scanner whose pattern never matches, and a checker whose failure path prints
+`FAIL` and forgets to set the exit code. All three exit 0. All three would have
+exited 0 whether the work was done or not, which is the one thing an exit code
+cannot tell you about itself.
+
+bevis refuses two shapes of that. The first costs nothing and is on by default:
+**evidence whose own output says it measured nothing.**
+
+```console
+$ bevis add "Run the unit tests" --acceptance "the unit test suite passes"
+created job 5: Run the unit tests
+$ mkdir suite
+$ bevis close 5 --run "python -m unittest discover -s suite"
+bevis: refusing to close job 5 on evidence that measured nothing:
+  - the output says 'Ran 0 tests', and nothing else in it reports a non-zero count
+A run that examined no tests, no files and no rows exited 0 because there was nothing there to disagree with. That is a constant, not a check. Point the command at the work and run it again.
+$ echo $?
+1
+```
+
+Nothing was wrong with that command. It ran, it exited 0, it printed something —
+it just had no tests to run, and a runner with nothing to run cannot disagree
+with you. Give it one and the same command closes the job:
+
+```console
+$ printf 'import unittest\nclass Arithmetic(unittest.TestCase):\n    def test_addition(self):\n        self.assertEqual(1 + 1, 2)\n' > suite/test_arithmetic.py
+$ bevis close 5 --run "python -m unittest discover -s suite"
+closed job 5 with evidence (exit 0 from: python -m unittest discover -s suite)
+```
+
+The second shape needs a phrase list to be lucky, and a negative control to be
+sure. Here is a secret scanner with the defect above — its failure path prints
+and returns 0 — and here is bevis closing a job on it, because every rule so far
+is satisfied:
+
+```console
+$ export BEVIS_ACTOR=alice
+$ printf '%s\n' '#!/bin/sh' 'grep -q SECRET "$1" && echo "FAIL: secret in $1"' 'echo "scanned $1"' > leakcheck.sh && chmod +x leakcheck.sh
+$ printf 'nothing to see here\n' > clean.txt
+$ printf 'SECRET=hunter2\n' > planted.txt
+$ bevis add "Scan the bundle for secrets" --acceptance "leakcheck.sh finds no secret in the bundle"
+created job 6: Scan the bundle for secrets
+$ bevis close 6 --run "./leakcheck.sh clean.txt"
+closed job 6 with evidence (exit 0 from: ./leakcheck.sh clean.txt)
+```
+
+That close is worthless and nothing so far can tell. **`--negative-control` is
+how you ask:** a second command that must FAIL. bevis runs both, and the close
+needs the verification to pass *and* the control not to.
+
+```console
+$ export BEVIS_ACTOR=alice
+$ bevis reopen 6 --reason "prove the scanner can fail before trusting it"
+job 6 reopened (evidence discarded, see `bevis events`)
+$ bevis close 6 --run "./leakcheck.sh clean.txt" --negative-control "./leakcheck.sh planted.txt"
+bevis: refusing to close job 6 on a check that cannot fail:
+  - verify           exited 0: ./leakcheck.sh clean.txt
+  - negative control exited 0: ./leakcheck.sh planted.txt
+The control was supposed to fail and it passed, so this command reports success whether the work was done or not. That is not evidence, it is a constant. Fix the check, or point --negative-control at a case that must fail.
+$ echo $?
+1
+```
+
+Fix the scanner — one `exit 1` — and the identical command line closes the job:
+
+```console
+$ export BEVIS_ACTOR=alice
+$ printf '%s\n' '#!/bin/sh' 'if grep -q SECRET "$1"; then echo "FAIL: secret in $1"; exit 1; fi' 'echo "scanned $1: clean"' > leakcheck.sh
+$ bevis close 6 --run "./leakcheck.sh clean.txt" --negative-control "./leakcheck.sh planted.txt"
+closed job 6 with evidence (exit 0 from: ./leakcheck.sh clean.txt)
+negative control exited 1, as a control must: ./leakcheck.sh planted.txt
+$ bevis show 6 | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/<timestamp>/'
+job        6 (internal id 6)
+title      Scan the bundle for secrets
+status     closed
+acceptance leakcheck.sh finds no secret in the bundle
+ready      no — status is closed, not open
+created    <timestamp>
+evidence:
+  closed_by   alice at <timestamp>
+  verify_cmd  ./leakcheck.sh clean.txt
+  verify_exit 0
+  verify_output:
+    | scanned clean.txt: clean
+  negative control:
+    cmd    ./leakcheck.sh planted.txt
+    exit   1
+    output:
+      | FAIL: secret in planted.txt
+```
+
+The control is stored beside the evidence, not folded into it, because it is a
+different claim: the verification says the work is done, and the control says
+the command asking would have noticed if it were not.
+
+Three things about that gate, because a gate is only worth what it is honest
+about:
+
+* **bevis runs the control itself**, in the same environment as the
+  verification, and sets no variable telling it which of the two runs it is. A
+  command that could see it was the control could pass this gate by failing on
+  sight of the flag. For the same reason there is no transcribed form:
+  `--negative-control` needs `--run`.
+* **A control that exits 126 or 127 is refused**, not accepted. Those are the
+  shell saying it could not run the command at all, and a control that failed to
+  start has been shown not to exist rather than shown to fail.
+* **bevis cannot invent a control for you**, which is why this one is a flag and
+  not a default. A control bevis chose would be exactly the fake check this tool
+  exists to refuse. The vacuity rule is free, so it is on; this one costs a
+  second run and a thought, so you ask for it. See
+  [Limitations](#limitations) for how far each of them goes.
 
 ## Quickstart: plug in your own agent
 
@@ -259,6 +377,14 @@ pip install -e .
 pip install -e '.[api]'
 ```
 
+**Upgrading from 0.1.x.** Run `bevis init` once against an existing board: it is
+idempotent, it adds the three columns a negative control is stored in, and it
+touches no job. Until you do, ordinary closes work exactly as before and a close
+carrying `--negative-control` is refused by name. One behaviour change is not
+opt-in: a close whose output says it measured nothing is now refused, where
+0.1.x accepted it — the phrases and the argument for that default are in
+[docs/DESIGN.md](docs/DESIGN.md).
+
 The core deliberately depends on nothing. Verification has to happen where the
 work happens — a build box, a container, someone's laptop — and a gate that is
 expensive to install is a gate that does not get installed.
@@ -314,18 +440,54 @@ push. A document without a command behind it is decoration.
 Read this before adopting bevis. None of it is throat-clearing.
 
 * **A close proves an artefact exists, not that it is relevant.** `bevis close 3
-  --run "echo done"` closes job 3, and the evidence will say `echo done`. bevis
-  makes the lie small, specific and permanently attached to the job; it does not
-  make it impossible. Relevance is what the acceptance bar, a blocking check and
-  a human reading `bevis show` are for.
+  --run "echo done"` still closes job 3, and the evidence will still say `echo
+  done`. Two narrower things became structural rather than conceded: a close
+  whose output *says* it measured nothing is refused by default, and a close
+  carrying a `--negative-control` that also passed is refused. Neither of them
+  makes relevance checkable. `echo done` measures nothing bevis has a phrase for
+  and carries no control unless you supply one, so it goes through, and that is
+  the honest limit: bevis makes the lie small, specific and permanently attached
+  to the job; it does not make it impossible. Relevance is what the acceptance
+  bar, a blocking check and a human reading `bevis show` are for.
+* **The negative control is opt-in, and nothing turns it on for you.** bevis
+  cannot invent a control: a control bevis chose would be exactly the fake check
+  this tool exists to refuse. So `--negative-control` raises the evidence quality
+  of one close, on the closes where somebody remembered — the default board is
+  no better calibrated than it was before. That is a real gap and it is the
+  reason this is a flag rather than a promise.
+* **A negative control proves the command can fail, not that it fails for the
+  right reason.** `./check.sh planted.txt` might be exiting non-zero because the
+  check works, or because the file is missing, or because a path is wrong. bevis
+  observes one bit — the control did not pass — and stores the command and its
+  output next to the evidence so the next person can read *why* it failed. It
+  cannot tell a control that failed for the intended reason from one that fell
+  over on the way. That is the same class of limit as the one above it, one step
+  further in.
+* **The vacuity lexicon is a phrase list, not an understanding.** It knows about
+  ten shapes that mean "this run examined nothing" — `Ran 0 tests`, `no tests
+  ran`, `collected 0 items`, `[no test files]`, `0 passed`, `0 examples`,
+  `0 files checked`, `no files to check`, `nothing to verify` — and it stands
+  down when the same output reports a non-zero count anywhere, so a build log
+  that mentions one empty sub-run beside `312 passed` is not refused. It is
+  deliberately narrower than it could be: `no matches`, `no files matched`,
+  `(0 rows)` and `nothing to commit` are absent because each of them is the
+  *passing* output of some real check, and a rule that refused honest evidence
+  would teach people to route around bevis. What it therefore cannot catch is a
+  domain number that is wrong: `redacted_count: 0` printed by a redactor that
+  redacted 178 times exits 0 and reads like any other count. A negative control
+  catches that. A phrase list never will. Both halves of the calibration are a
+  corpus in `tests/test_vacuity.py`, and both have a mutant.
 * **The `--verify-*` form trusts your transcription.** `bevis close 3
   --verify-cmd "make test" --verify-exit 0 --verify-output-file ci.log` is how
   evidence from CI or another machine gets in, and bevis cannot tell whether you
   typed it faithfully. What it still guarantees is that a transcription exists,
   that it names a command, and that the command exited zero.
 * **A check is only as good as the command you point at.** `--cmd true` is a
-  valid blocking check that always passes. bevis records what you chose to
-  measure and has no opinion about whether it measures the right thing.
+  valid blocking check that always passes, and a check has no negative control
+  of its own — `--negative-control` is on `bevis close`, not on `bevis check
+  add`, so the dispatcher's closes are covered by the vacuity rule and nothing
+  else. bevis records what you chose to measure and has no opinion about whether
+  it measures the right thing.
 * **The event log is not tamper-evident.** No hash chain, no signatures. Anyone
   with write access to the SQLite file can rewrite history, and the evidence a
   job carries is a recorded string, not a signed artefact. bevis raises the

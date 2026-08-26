@@ -165,6 +165,17 @@ belong on this page; that is the same standard bevis holds a job to.
    structural. The refusal is a lint, and [Limitations](README.md#limitations) lists what
    it knows and what walks past.
 
+8. **A close is refused when the evidence could not have failed.** Two rules, one free and
+   one asked for. By default a close whose output says in its own words that it examined
+   nothing — `Ran 0 tests`, `collected 0 items`, `no files to check` — is refused, and the
+   phrase list is calibrated in both directions against a corpus of real output so that
+   `0 errors`, `0 leaks found` and `(0 rows)` are never mistaken for it. On request,
+   `--negative-control` makes bevis run a second command that must FAIL, and refuses the
+   close if it passes too. What bevis will not do is invent that second command: a control
+   bevis chose would be exactly the fake check the rule exists to refuse, which is why one
+   of these is a default and the other is a flag. The argument is in
+   [docs/DESIGN.md](docs/DESIGN.md), the limits are in [Limitations](README.md#limitations).
+
 | # | Claim | Enforced in | Test that fails if the claim is false | Mutant that proves that test can fail |
 |---|---|---|---|---|
 | 1 | Acceptance bar required at create | `core.create_job` | `test_acceptance_is_required`, `test_acceptance_of_only_whitespace_is_not_a_bar`, `test_cli_refuses_add_without_acceptance`, `test_acceptance_cannot_be_emptied_by_update` | `acceptance-bar-optional` |
@@ -174,10 +185,14 @@ belong on this page; that is the same standard bevis holds a job to.
 | 5 | `verified` needs a different actor | `core.verify_job` | `test_verify_by_the_actor_who_closed_it_is_refused`, `test_verify_ignores_case_when_comparing_actors`, `test_cli_verify_by_the_closer_exits_1` | `self-verification-allowed` |
 | 6 | Stdlib-only core, no network, no model SDK anywhere | package imports, `pyproject.toml` | `test_the_core_imports_only_the_standard_library`, `test_the_core_cannot_reach_a_network`, `test_no_module_imports_a_model_provider_sdk`, `test_the_package_declares_no_runtime_dependencies` | none — these read the package's own imports with `ast`, so there is no rule in the code to delete. They fail the moment an import appears. |
 | 7 | No credential, endpoint or model of yours inside bevis | `bevis.adapters`, the `adapter` table | `test_the_registry_stores_only_a_name_and_a_command`, `test_registering_an_inline_credential_is_refused`, `test_the_shapes_a_pasted_secret_takes_are_refused`, `test_a_secret_referenced_from_the_environment_is_not_a_secret` | `registry-stores-a-pasted-credential`, `credential-lint-refuses-an-environment-reference` |
+| 8 | Evidence that measured nothing is refused, and real output never is | `core.vacuity_problem`, `core.close_job` | `test_output_that_measured_nothing_is_vacuous`, `test_real_passing_output_is_never_called_vacuous`, `test_a_log_that_measured_something_is_not_vacuous`, `test_close_with_vacuous_output_is_refused`, `test_the_dispatcher_cannot_close_on_a_check_that_measured_nothing` | `vacuous-output-accepted`, `vacuity-refuses-a-log-that-measured-something`, `vacuity-needle-matches-a-bigger-number` |
+| 9 | A negative control that also passes refuses the close | `core.close_by_running`, `core._control_refusal` | `test_a_control_that_also_passes_is_refused`, `test_the_same_close_succeeds_once_the_checker_can_fail`, `test_a_control_that_never_ran_is_not_a_control_that_failed`, `test_the_control_is_actually_run_not_merely_recorded`, `test_the_control_is_not_told_that_it_is_the_control` | `control-that-also-passed-is-accepted`, `control-that-never-ran-counts-as-a-failure`, `control-command-never-actually-run`, `negative-control-accepted-without-run` |
 
-Two things the table deliberately does not launder. Claim 4's atomic claim — one job per
+Three things the table deliberately does not launder. Claim 4's atomic claim — one job per
 slot, ever — has a test that compares recorded run intervals, but **no mutant**: remove
-the atomicity and the suite usually still passes, because the race rarely loses. And the
+the atomicity and the suite usually still passes, because the race rarely loses. Claim 8's
+phrase list is a phrase list: it catches ten shapes and is blind to a domain counter that
+is simply wrong, and claim 9 only fires on the closes where somebody asked for it. And the
 `test_docs_claims.py` suite asserts that every test named in this file exists, so this
 table cannot quietly rot into a list of names that no longer resolve; it cannot tell you
 whether the test still *means* what the row says.

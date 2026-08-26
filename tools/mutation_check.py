@@ -54,6 +54,68 @@ MUTANTS = [
      '    if False:',
      ["test_close_with_no_evidence_at_all_is_refused"]),
 
+    # ── The vacuity lexicon ─────────────────────────────────────────────────
+    # A command that exits 0 having measured nothing has not verified anything.
+    ("vacuous-output-accepted", "bevis/core.py",
+     '''    vacuous = vacuity_problem(verify_output)
+    if vacuous:''',
+     '''    vacuous = vacuity_problem(verify_output)
+    if False:''',
+     ["test_close_with_vacuous_output_is_refused",
+      "test_cli_close_on_a_vacuous_run_exits_1",
+      "test_the_dispatcher_cannot_close_on_a_check_that_measured_nothing"]),
+
+    # The other direction, and the one that matters more: a lexicon that also
+    # refuses a real build log mentioning one empty sub-run is not a gate, it is
+    # an obstacle, and people route around obstacles.
+    ("vacuity-refuses-a-log-that-measured-something", "bevis/core.py",
+     '''    if not needle or measured_something(text):''',
+     '''    if not needle:''',
+     ["test_a_log_that_measured_something_is_not_vacuous"]),
+
+    # `0 passed` must not fire inside `100 passed`. Asserted against the lexicon
+    # itself, because the counter-evidence rule above would otherwise mask it.
+    ("vacuity-needle-matches-a-bigger-number", "bevis/core.py",
+     '''    re.compile(r"(?i)(?<![\\d.,])0 pass(?:ed|ing)\\b"),''',
+     '''    re.compile(r"(?i)0 pass(?:ed|ing)\\b"),''',
+     ["test_a_needle_does_not_match_a_bigger_number"]),
+
+    # ── The negative control ────────────────────────────────────────────────
+    ("control-that-also-passed-is-accepted", "bevis/core.py",
+     '''    if control_exit == 0:''',
+     '''    if False:''',
+     ["test_a_control_that_also_passes_is_refused",
+      "test_cli_close_with_a_control_that_passes_exits_1",
+      "test_a_negative_control_that_passes_is_409_over_http"]),
+
+    ("control-that-never-ran-counts-as-a-failure", "bevis/core.py",
+     '''    if control_exit in CONTROL_DID_NOT_RUN:''',
+     '''    if False:''',
+     ["test_a_control_that_never_ran_is_not_a_control_that_failed",
+      "test_a_control_that_is_not_executable_is_refused_too"]),
+
+    # The gate as a stored string: bevis records a control it never executed.
+    ("control-command-never-actually-run", "bevis/core.py",
+     '''    elif control_cmd:
+        control_exit, cout, cerr = run_command(control_cmd, timeout=timeout, env=env)''',
+     '''    elif control_cmd:
+        control_exit, cout, cerr = 1, "the control was not run", ""''',
+     ["test_the_control_is_actually_run_not_merely_recorded",
+      "test_a_control_that_also_passes_is_refused",
+      "test_the_control_is_not_told_that_it_is_the_control"]),
+
+    ("old-board-drops-the-control-it-was-given", "bevis/core.py",
+     '''        if not has_negative_control(conn):
+            raise UsageError(_OLD_BOARD)''',
+     '''        if False:
+            raise UsageError(_OLD_BOARD)''',
+     ["test_close_job_on_an_old_board_refuses_a_control_rather_than_dropping_it"]),
+
+    ("negative-control-accepted-without-run", "bevis/cli.py",
+     '''                if args.negative_control:''',
+     '''                if False:''',
+     ["test_cli_negative_control_without_run_is_refused"]),
+
     ("acceptance-bar-optional", "bevis/core.py",
      '''    if not acceptance:
         raise UsageError(''',

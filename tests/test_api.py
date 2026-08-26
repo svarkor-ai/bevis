@@ -112,6 +112,44 @@ def test_close_with_evidence_works_over_http(api):
     assert status == 200 and closed["status"] == "closed"
 
 
+def test_a_negative_control_that_passes_is_409_over_http(api):
+    """Same rule, same code: the API reaches `closed` only through close_job()."""
+    _, job = call(api, "POST", "/jobs", {"title": "j", "acceptance": "bar"})
+    status, body = call(api, "POST", "/jobs/%d/close" % job["id"],
+                        {"run": "echo real evidence", "negative_control": "true"})
+    assert status == 409
+    assert "a check that cannot fail" in body["refused"]
+    _, fetched = call(api, "GET", "/jobs/%d" % job["id"])
+    assert fetched["status"] == "open"
+
+
+def test_a_negative_control_that_fails_closes_over_http(api):
+    _, job = call(api, "POST", "/jobs", {"title": "j", "acceptance": "bar"})
+    status, closed = call(api, "POST", "/jobs/%d/close" % job["id"],
+                          {"run": "echo real evidence",
+                           "negative_control": "echo planted; exit 1"})
+    assert status == 200 and closed["status"] == "closed"
+    assert closed["control_exit"] == 1
+
+
+def test_a_negative_control_without_run_is_422_over_http(api):
+    _, job = call(api, "POST", "/jobs", {"title": "j", "acceptance": "bar"})
+    status, body = call(api, "POST", "/jobs/%d/close" % job["id"],
+                        {"verify_cmd": "make test", "verify_exit": 0,
+                         "verify_output": "41 passed", "negative_control": "false"})
+    assert status == 422
+    assert "negative_control needs run" in body["error"]
+
+
+def test_vacuous_evidence_is_refused_over_http(api):
+    _, job = call(api, "POST", "/jobs", {"title": "j", "acceptance": "bar"})
+    status, body = call(api, "POST", "/jobs/%d/close" % job["id"],
+                        {"verify_cmd": "python -m unittest discover",
+                         "verify_exit": 0, "verify_output": "Ran 0 tests in 0.000s"})
+    assert status == 409
+    assert "measured nothing" in body["refused"]
+
+
 def test_nonzero_exit_is_still_refused_over_http(api):
     _, job = call(api, "POST", "/jobs", {"title": "j", "acceptance": "bar"})
     status, body = call(api, "POST", "/jobs/%d/close" % job["id"],

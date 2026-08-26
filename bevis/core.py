@@ -17,11 +17,12 @@ exit code instead. That is the entire product.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 from typing import List, Optional, Tuple
 
-from .db import display_id, get_job, log_event, resolve_id
+from .db import display_id, get_job, has_negative_control, log_event, resolve_id
 from .errors import NotFound, Refusal, UsageError
 from .model import (
     DONE_STATUSES,
@@ -40,6 +41,107 @@ MAX_STORED_OUTPUT = 64_000
 
 #: Default wall-clock ceiling for any command bevis runs on your behalf.
 DEFAULT_TIMEOUT = 900
+
+#: What a POSIX shell returns when it could not run the command at all: 126
+#: "found but not executable", 127 "not found". A negative control that came
+#: back with one of these did not fail. It never started, which is the DOCTRINE
+#: 2 defect — a checker that errored out and was read as a clean result —
+#: wearing the costume of a gate that worked.
+CONTROL_DID_NOT_RUN = (126, 127)
+
+
+# ── The vacuity lexicon ──────────────────────────────────────────────────────
+# A command that exits 0 having examined NOTHING has not verified anything. It
+# returned success because there was nothing there to disagree with.
+#
+# Every pattern below is on one side of a single distinction, and the whole
+# calibration of this lexicon rests on it:
+#
+#     zero SUBJECTS  — "Ran 0 tests", "collected 0 items", "no files to check"
+#                      -> the run measured nothing. Refused.
+#     zero DEFECTS   — "0 errors", "0 leaks found", "0 tests failed", "(0 rows)"
+#                      -> the run measured something and found it clean. This is
+#                         the answer you WANTED, and refusing it would make the
+#                         rule worse than useless.
+#
+# The shapes that read both ways — "no matches", "no files matched", "(0 rows)",
+# "nothing to commit" — are deliberately absent. Each of them is the passing
+# output of some real check (a secret scan finds no matches; an integrity query
+# returns no orphan rows), and a lexicon that refused them would refuse real
+# evidence. tests/test_vacuity.py holds both halves of that corpus.
+_VACUOUS_PHRASES = (
+    # unittest, pytest, jest, rspec: the runner ran and collected nothing.
+    re.compile(r"(?i)\bran 0 tests\b"),
+    re.compile(r"(?i)\bno tests (?:ran|were run|executed)\b"),
+    re.compile(r"(?i)\bno tests (?:were )?found\b"),
+    re.compile(r"(?i)\bcollected 0 items\b"),
+    # The negative lookahead is the entire difference between "0 tests ran"
+    # (nothing was measured) and "0 tests failed" (everything was, and passed).
+    re.compile(r"(?i)(?<![\d.,])0 (?:tests?|test cases?|examples?|specs?|"
+               r"scenarios?|assertions?)\b"
+               r"(?!\s+(?:failed|failing|failures?|errors?|issues?|problems?|"
+               r"warnings?|skipped|remaining))"),
+    re.compile(r"(?i)(?<![\d.,])0 pass(?:ed|ing)\b"),
+    # `go test` on a package with no _test.go files. Bracketed and literal, so
+    # there is no honest sentence it can be a fragment of.
+    re.compile(r"(?i)\[no test files\]"),
+    # Scanners and linters, in both word orders.
+    re.compile(r"(?i)(?<![\d.,])0 (?:files?|matches|items?|records?|lines?|paths?)"
+               r" (?:were )?(?:scanned|checked|searched|examined|inspected|"
+               r"processed|analysed|analyzed|linted|compared)\b"),
+    re.compile(r"(?i)\b(?:scanned|checked|searched|examined|inspected|processed|"
+               r"analysed|analyzed|linted|compared)\s+0 "
+               r"(?:files?|matches|items?|records?|lines?|paths?)\b"),
+    # "no files to check" is a tool saying it was handed no input. "no files
+    # matched" and "no files found" are deliberately NOT here: those are what a
+    # check asserting the ABSENCE of something prints when it passes.
+    re.compile(r"(?i)\bno (?:input )?(?:\w+ )?files? (?:to (?:check|scan|lint|"
+               r"format|process|test|analyse|analyze)\b|given\b|specified\b|"
+               r"provided\b)"),
+    re.compile(r"(?i)\bnothing to (?:check|scan|verify|test|analyse|analyze)\b"),
+)
+
+#: Counter-evidence: somewhere in the same output, a NON-ZERO count of subjects.
+#: A four-thousand-line build log that mentions one empty sub-run and also says
+#: "312 passed" measured plenty, and refusing it would be a false accusation.
+#: This is the second-order half of the calibration, and it is what keeps the
+#: lexicon usable against real logs rather than only against toy ones.
+_MEASURED_SOMETHING = re.compile(
+    r"(?i)(?<![\d.,])[1-9][\d,]*\s+(?:tests?|test cases?|examples?|specs?|"
+    r"scenarios?|assertions?|checks?|items?|files?|matches|results?|rows?|"
+    r"records?|lines?|passed|passing|selected|collected)\b")
+
+
+def first_vacuity_needle(text: str) -> Optional[str]:
+    """The literal "this measured nothing" phrase found in `text`, or None.
+
+    It returns what it actually matched, not a category name, because the whole
+    refusal rests on quoting the output back at the person reading it.
+
+
+    Deliberately separate from vacuity_problem(): the counter-evidence rule
+    below can mask a badly written pattern, so the lexicon is testable on its
+    own, in both directions, without the rescue hiding a miscalibration.
+    """
+    for pattern in _VACUOUS_PHRASES:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def measured_something(text: str) -> Optional[str]:
+    """A non-zero count of subjects somewhere in the same output, or None."""
+    match = _MEASURED_SOMETHING.search(text or "")
+    return match.group(0).strip() if match else None
+
+
+def vacuity_problem(text: str) -> Optional[str]:
+    """Name what makes this output vacuous, or None if it measured something."""
+    needle = first_vacuity_needle(text)
+    if not needle or measured_something(text):
+        return None
+    return needle
 
 
 # ── Small helpers ────────────────────────────────────────────────────────────
@@ -447,12 +549,61 @@ def _evidence_problems(verify_cmd, verify_exit, verify_output) -> List[str]:
     return problems
 
 
-def close_job(conn, ref, verify_cmd, verify_exit, verify_output, actor="") -> dict:
+#: The refusal a board that predates negative controls gets, naming the one
+#: command that fixes it rather than letting a stranger meet a raw
+#: sqlite3.OperationalError about an unknown column.
+_OLD_BOARD = (
+    "this database cannot store a negative control — it was created by an older "
+    "bevis. Run `bevis init` again: it is idempotent and adds the columns "
+    "without touching your jobs."
+)
+
+
+def _control_refusal(ref, verify_cmd, control_cmd, control_exit) -> Optional[str]:
+    """Why this negative control does not license the close, or None.
+
+    A negative control is a command that MUST fail. It is how you answer the one
+    question the evidence cannot answer about itself: would this command have
+    said anything different if the work had not been done? `--cmd true` passes.
+    So does a test runner that found no tests, a scanner whose pattern never
+    matches, and a checker whose failure path prints FAIL and returns 0. Run the
+    same command against a case that must fail; if it passes there too, it is not
+    a check, it is a constant.
+    """
+    if not isinstance(control_cmd, str) or not control_cmd.strip():
+        return None
+    if control_exit in CONTROL_DID_NOT_RUN:
+        return (
+            "refusing to close job %s: the negative control never ran:\n"
+            "  - negative control exited %d: %s\n"
+            "%d is how a shell reports a command it could not run at all. A "
+            "control that failed to start has not been shown to fail — it has "
+            "been shown not to exist. Fix the command."
+            % (ref, control_exit, control_cmd.strip(), control_exit)
+        )
+    if control_exit == 0:
+        return (
+            "refusing to close job %s on a check that cannot fail:\n"
+            "  - verify           exited 0: %s\n"
+            "  - negative control exited 0: %s\n"
+            "The control was supposed to fail and it passed, so this command "
+            "reports success whether the work was done or not. That is not "
+            "evidence, it is a constant. Fix the check, or point "
+            "--negative-control at a case that must fail."
+            % (ref, (verify_cmd or "").strip(), control_cmd.strip())
+        )
+    return None
+
+
+def close_job(conn, ref, verify_cmd, verify_exit, verify_output, actor="",
+              control_cmd=None, control_exit=None, control_output=None) -> dict:
     """Close a job — the only path to status `closed`.
 
     Refuses unless all three pieces of evidence are present and the exit code is
-    zero, unless every blocking check on the job has been run and passed, and
-    unless the job's children are finished. Each refusal names what was missing.
+    zero, unless the output shows the command measured something, unless a
+    negative control (if one was run) actually failed, unless every blocking
+    check on the job has been run and passed, and unless the job's children are
+    finished. Each refusal names what was missing.
     """
     row = get_job(conn, ref)
     job_id = int(row["id"])
@@ -466,6 +617,32 @@ def close_job(conn, ref, verify_cmd, verify_exit, verify_output, actor="") -> di
             "Use `bevis close %s --run \"<command>\"` to have bevis run it for you."
             % (ref, "\n  - ".join(problems), ref)
         )
+
+    # Cheapest first, and it needs no subprocess: the evidence is already in
+    # hand, and it can say in its own words that it measured nothing.
+    vacuous = vacuity_problem(verify_output)
+    if vacuous:
+        raise Refusal(
+            "refusing to close job %s on evidence that measured nothing:\n"
+            "  - the output says %r, and nothing else in it reports a non-zero count\n"
+            "A run that examined no tests, no files and no rows exited 0 because "
+            "there was nothing there to disagree with. That is a constant, not a "
+            "check. Point the command at the work and run it again."
+            % (ref, vacuous)
+        )
+
+    if isinstance(control_cmd, str) and control_cmd.strip():
+        if not has_negative_control(conn):
+            raise UsageError(_OLD_BOARD)
+        if control_exit is None or isinstance(control_exit, bool) \
+                or not isinstance(control_exit, int):
+            raise UsageError(
+                "a negative control needs the exit code it produced — bevis runs "
+                "the control itself, with `bevis close %s --run \"<command>\" "
+                "--negative-control \"<a case that must fail>\"`" % ref)
+    refusal = _control_refusal(ref, verify_cmd, control_cmd, control_exit)
+    if refusal:
+        raise Refusal(refusal)
 
     failing = failing_blocking_checks(conn, job_id)
     if failing:
@@ -494,37 +671,73 @@ def close_job(conn, ref, verify_cmd, verify_exit, verify_output, actor="") -> di
 
     ts = now_ts()
     actor = actor or default_actor()
-    conn.execute(
-        "UPDATE job SET status='closed', closed_at=?, updated_at=?, closed_by=?, "
-        "verify_cmd=?, verify_exit=?, verify_output=?, blocked_reason=NULL WHERE id=?",
-        (ts, ts, actor, verify_cmd.strip(), int(verify_exit),
-         truncate(verify_output), job_id),
-    )
-    log_event(conn, job_id, actor, "closed", "exit=0 cmd=%s" % verify_cmd.strip())
+    fields = ("status='closed', closed_at=?, updated_at=?, closed_by=?, "
+              "verify_cmd=?, verify_exit=?, verify_output=?, blocked_reason=NULL")
+    values = [ts, ts, actor, verify_cmd.strip(), int(verify_exit),
+              truncate(verify_output)]
+    detail = "exit=0 cmd=%s" % verify_cmd.strip()
+    if has_negative_control(conn):
+        ran_control = isinstance(control_cmd, str) and bool(control_cmd.strip())
+        fields += ", control_cmd=?, control_exit=?, control_output=?"
+        values += [control_cmd.strip() if ran_control else None,
+                   int(control_exit) if ran_control else None,
+                   truncate(control_output or "") if ran_control else None]
+        if ran_control:
+            detail += " | negative control exit=%d cmd=%s" % (
+                int(control_exit), control_cmd.strip())
+    conn.execute("UPDATE job SET %s WHERE id=?" % fields, (*values, job_id))
+    log_event(conn, job_id, actor, "closed", detail)
     return job_dict(conn, get_job(conn, job_id))
 
 
-def close_by_running(conn, ref, cmd, timeout=DEFAULT_TIMEOUT, actor="") -> dict:
+def close_by_running(conn, ref, cmd, timeout=DEFAULT_TIMEOUT, actor="",
+                     negative_control=None) -> dict:
     """The strong form: bevis runs the command itself and records what happened.
 
     Nothing here can be talked around — the exit code is observed, not reported.
     A non-zero exit reaches close_job() unchanged and is refused there, with the
     real output attached so you can see why.
+
+    With `negative_control`, bevis runs a SECOND command that must fail, and the
+    close needs both answers: the verification passed AND the control did not.
+    Three deliberate choices about how that second run happens:
+
+    * The control runs only after the verification has already passed. A close
+      that is about to be refused anyway does not get to spend a second run.
+    * The control gets the SAME environment as the verification, and bevis sets
+      no variable announcing which of the two it is. A command that could see it
+      was the control could satisfy the gate by failing on sight of the flag,
+      and would then be a check that cannot fail wearing a proof that it can.
+    * bevis runs it. There is no way to hand in a control's exit code the way
+      `--verify-exit` hands in a verification's, because a transcribed control
+      is a claim about a claim, and the whole point of this one is observation.
     """
     row = get_job(conn, ref)
     if not (cmd or "").strip():
         raise UsageError("--run needs a command")
-    exit_code, out, err = run_command(
-        cmd, timeout=timeout,
-        env={"BEVIS_JOB_ID": str(int(row["id"])), "BEVIS_JOB_TITLE": row["title"]},
-    )
+    control_cmd = (negative_control or "").strip() or None
+    if control_cmd and not has_negative_control(conn):
+        raise UsageError(_OLD_BOARD)
+    env = {"BEVIS_JOB_ID": str(int(row["id"])), "BEVIS_JOB_TITLE": row["title"]}
+    exit_code, out, err = run_command(cmd, timeout=timeout, env=env)
     output = combined(out, err)
+    control_exit = control_output = None
     if exit_code != 0 or not output.strip():
         # Record the attempt even though the close is about to be refused: a
         # failed verification is information, and losing it wastes the run.
         log_event(conn, int(row["id"]), actor or default_actor(),
                   "close_refused", "exit=%d cmd=%s" % (exit_code, cmd))
-    return close_job(conn, ref, cmd, exit_code, output, actor=actor)
+        control_cmd = None
+    elif control_cmd:
+        control_exit, cout, cerr = run_command(control_cmd, timeout=timeout, env=env)
+        control_output = combined(cout, cerr)
+        if control_exit == 0 or control_exit in CONTROL_DID_NOT_RUN:
+            log_event(conn, int(row["id"]), actor or default_actor(),
+                      "close_refused", "negative control exit=%d cmd=%s"
+                      % (control_exit, control_cmd))
+    return close_job(conn, ref, cmd, exit_code, output, actor=actor,
+                     control_cmd=control_cmd, control_exit=control_exit,
+                     control_output=control_output)
 
 
 def verify_job(conn, ref, actor, note="") -> dict:
@@ -573,15 +786,21 @@ def reopen_job(conn, ref, reason, actor="") -> dict:
     if row["status"] != "closed":
         raise Refusal("job %s is %s, not closed — nothing to reopen"
                       % (ref, row["status"]))
-    log_event(conn, int(row["id"]), actor or default_actor(), "reopened",
-              "reason=%s | discarded evidence: cmd=%s exit=%s output=%s"
+    detail = ("reason=%s | discarded evidence: cmd=%s exit=%s output=%s"
               % (reason, row["verify_cmd"], row["verify_exit"],
                  truncate(row["verify_output"] or "", 2000)))
+    has_control = has_negative_control(conn)
+    if has_control and row["control_cmd"]:
+        detail += " | discarded negative control: cmd=%s exit=%s" % (
+            row["control_cmd"], row["control_exit"])
+    log_event(conn, int(row["id"]), actor or default_actor(), "reopened", detail)
     ts = now_ts()
+    extra = (", control_cmd=NULL, control_exit=NULL, control_output=NULL"
+             if has_control else "")
     conn.execute(
         "UPDATE job SET status='open', closed_at=NULL, closed_by=NULL, verify_cmd=NULL, "
         "verify_exit=NULL, verify_output=NULL, claimed_by=NULL, claimed_at=NULL, "
-        "updated_at=? WHERE id=?", (ts, int(row["id"])))
+        "updated_at=?%s WHERE id=?" % extra, (ts, int(row["id"])))
     return job_dict(conn, get_job(conn, int(row["id"])))
 
 

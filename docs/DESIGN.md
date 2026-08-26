@@ -13,11 +13,12 @@ in exactly one function — `core.close_job()` — and both the CLI and the HTTP
 reach `closed` only through it. There is no second implementation to drift, and
 no privileged caller.
 
-Two honest ways to close:
+Three honest ways to close, in descending order of what they prove:
 
 | form | who ran the command | when to use it |
 |---|---|---|
-| `bevis close 3 --run "pytest -q"` | **bevis** | the strong form: the exit code is observed, not reported |
+| `bevis close 3 --run "./scan.sh clean/" --negative-control "./scan.sh planted/"` | **bevis**, twice | the strongest form: the exit code is observed AND the command is shown to be capable of failing (§1a) |
+| `bevis close 3 --run "pytest -q"` | **bevis** | the exit code is observed, not reported |
 | `bevis close 3 --verify-cmd "make test" --verify-exit 0 --verify-output-file ci.log` | somebody else | evidence from CI, another host, a colleague |
 
 The second form is weaker on purpose and openly so: bevis is trusting your
@@ -32,6 +33,165 @@ done"` will close job 3, and the evidence will say `echo done`. bevis makes the
 lie small, specific, and permanently attached to the job — it does not make it
 impossible. Relevance is what the `acceptance` bar and a human reading `bevis
 show` are for; blocking checks are how you mechanise it.
+
+It also could not, until 0.2.0, tell the difference between a command that
+passed and a command that *cannot fail*. Section 1a is about the part of that
+which turned out to be mechanisable, and about the part that did not.
+
+## 1a. A check that cannot fail
+
+The invariant answers "did a command run and exit 0". Underneath it sits a
+question the exit code cannot answer about itself: **would that command have
+said anything different if the work had not been done?**
+
+Four independent instances of that defect in a single day, in one small
+estate, are what this section comes from:
+
+* a publish workflow running `unittest discover` that found **zero tests** and
+  exited 0;
+* a checker whose failure path printed `FAIL` and never set the exit flag;
+* a leak scan reporting "0 leaks" because its needles were exactly what its own
+  redactor had already stripped;
+* a counter reporting `redacted_count: 0` while redacting 178 times.
+
+Every one of them would have closed a bevis 0.1.0 job. As governance that is an
+annoyance a human catches while reading the board. As training data — and a
+closed bevis job is a labelled outcome, which is the whole reason anything wants
+to read this database — it is poison: a person spots a fake close, a corpus
+pipeline ingests it as a positive example and learns that asserting completion
+works.
+
+Two mechanisms, because no one of them catches all four.
+
+### The vacuity lexicon (default, free)
+
+`close_job()` refuses evidence whose own output says it examined nothing. About
+ten phrases, all on one side of a single distinction:
+
+| | |
+|---|---|
+| zero **subjects** | `Ran 0 tests`, `collected 0 items`, `[no test files]`, `0 passed`, `0 examples`, `0 files checked`, `no files to check`, `nothing to verify` — the run measured nothing. **Refused.** |
+| zero **defects** | `0 errors`, `0 tests failed`, `0 leaks found`, `(0 rows)`, `nothing to commit`, `0 files changed` — the run measured something and found it clean. This is the answer you wanted. **Never refused.** |
+
+The second column is not decoration. It is the reason the lexicon is smaller
+than the obvious version of itself: "no matches" is what a working secret scan
+prints, "(0 rows)" is what an integrity query prints when there are no orphans,
+and a rule that refused those would refuse real evidence and teach people to
+route around bevis. `tests/test_vacuity.py` holds both halves as a corpus —
+fourteen outputs that must be refused and twenty-eight that must not — and both
+directions have a mutant (`vacuous-output-accepted`,
+`vacuity-refuses-a-log-that-measured-something`).
+
+There is a second-order rule doing real work: a needle is **disregarded when the
+same output reports a non-zero count of subjects anywhere**. A four-thousand-line
+build log that mentions one empty sub-run beside `312 passed` measured plenty,
+and without that rule the lexicon would be unusable against real logs — which is
+to say, unusable. It is the rule most likely to be deleted by a tidy refactor, so
+it has its own mutant and its own test.
+
+What the lexicon cannot do is read a domain number. `redacted_count: 0` from a
+redactor that redacted 178 times exits 0 and looks like any other count. The
+fourth incident above needs the other mechanism.
+
+### The negative control (opt-in, one run)
+
+`bevis close 3 --run "<command>" --negative-control "<a case that must fail>"`.
+bevis runs both and requires both answers: the verification passed **and** the
+control did not. If both pass, the close is refused — the same command reports
+success whether the work was done or not, which is a constant, not a check.
+
+Four decisions worth the argument:
+
+* **bevis runs the control itself, and there is no transcribed form.**
+  `--negative-control` requires `--run`. The control is worth something only
+  because bevis observed it fail; pairing an observed control with `--verify-cmd`
+  evidence from somewhere bevis cannot see would let the strong half launder the
+  weak one. If your CI is where the work happens, run both there and make the
+  verification the command that runs both.
+* **The control is not told that it is the control.** Same environment, same
+  `BEVIS_JOB_*` variables, no `BEVIS_NEGATIVE_CONTROL=1`. A command that could
+  see which run it was in could satisfy this gate by failing on sight of the
+  flag — a check that cannot fail, wearing a proof that it can. That is the same
+  hole `BEVIS_DOCTOR_PROBE` openly has (§8), and here it is avoidable, so it is
+  avoided. `test_the_control_is_not_told_that_it_is_the_control` compares the two
+  runs' own view of their environment rather than trusting this paragraph.
+* **126 and 127 are refusals, not failures.** They are the shell reporting a
+  command it could not run at all. A control that failed to start has been shown
+  not to exist, not shown to fail — and reading an error as a clean result is
+  precisely the DOCTRINE 2 incident.
+* **The control runs only after the verification has passed.** A close that is
+  going to be refused anyway does not get to spend a second subprocess.
+
+The control's command, exit code and output are stored on the job in three
+columns of their own, beside the evidence and not folded into it, because they
+are a different claim. Folding them into `verify_output` would make the evidence
+a summary of two runs, and a summary is a claim about evidence rather than
+evidence.
+
+### Why one is default and the other is a flag
+
+This is the decision most likely to be wrong, so here is the whole argument.
+
+**The negative control has to be opt-in, and not because of upgrade pain.** bevis
+cannot invent a control. There is no command it could pick that is a genuine
+failing case for your work, and a control bevis chose would be exactly the fake
+check this whole section exists to refuse. Making it mandatory would therefore
+mean either refusing every close on a board that has not adopted it — which is
+not an upgrade, it is a different tool — or shipping a default control, which
+would be the tool lying. Opt-in here is not the weak choice; it is the only
+honest one. What it costs is stated in the README's Limitations rather than
+buried: the default board is no better calibrated than it was, and the closes
+that carry a control are the ones somebody remembered.
+
+**The vacuity lexicon is default-on and refuses.** Four reasons, in the order
+they mattered:
+
+1. *It costs nothing.* No subprocess, no second run — a regex over a string
+   already in hand. A gate whose cost is zero has no argument for being optional
+   except fear of its false positives, which is a reason to calibrate it, not to
+   hide it behind a flag.
+2. *Opt-in would make it a log stub.* The person who would go and enable a
+   "refuse evidence that measured nothing" flag is the person who was already
+   going to read the output. The person it is for is the one who is not looking.
+   A gate nobody enables gates nothing, and this project has a rule about
+   capabilities that are armed and inert (DOCTRINE 5).
+3. *Its false-positive surface is measured, not asserted.* Twenty-eight real
+   passing outputs in the corpus must never be refused, two of them come close
+   enough to trip a needle and are saved by the counter-evidence rule, and a
+   mutant proves that rule can fail. That is what earns a default.
+4. *The shapes it refuses are the ones that poison a label corpus*, and a corpus
+   is built from the default path, not from the flag.
+
+**What it costs on upgrade, stated plainly.** A close that bevis 0.1.0 accepted
+can be refused by 0.2.0. Specifically: a close whose output matches one of the
+ten phrases and reports no non-zero count anywhere. If that describes a close you
+were relying on, the close was reporting that it measured nothing, and the fix is
+to point the command at the work — but it is a behaviour change in a patch a
+`pip install --upgrade` will pick up, so it is a minor version bump and it is
+listed here rather than discovered. Nothing rewrites history: jobs already closed
+are untouched, and no existing evidence is re-examined.
+
+**What is deliberately absent.** There is no `--force`, no
+`--allow-empty-result`, and no environment variable that turns the vacuity rule
+off. An escape hatch on a heuristic is a second door, and this project has an
+incident about a second, older function that reached the same finished-looking
+state without the new check on it (DOCTRINE 6). The way past a vacuity refusal is
+to make the command measure something. If that turns out to be wrong — if a real
+workflow is blocked by an honest output the lexicon cannot tell from a vacuous
+one — the answer is to fix the lexicon and add the output to the corpus, in
+public, where the next person can see what moved.
+
+### Storage, and an older board
+
+Three columns on `job`: `control_cmd`, `control_exit`, `control_output`. A board
+created by bevis 0.1.x does not have them, so `bevis init` gained an additive
+migration (`db.migrate()`): it adds missing columns and does nothing else — no
+drop, no rename, no rewrite — which is why running it on a current board is a
+no-op and running it on an old one cannot lose evidence. Until it is run, an
+ordinary close still works and a close carrying a control is refused by name,
+with `bevis init` in the message. That is the same shape as the adapter
+registry's refusal (§7), for the same reason: a stranger should not meet a raw
+`sqlite3.OperationalError` about a column.
 
 ## 2. Why `acceptance` is required at create
 
@@ -264,6 +424,12 @@ worse than a crash.
 tree and asserts that the guarding test fails. Every rule above has a mutant. A
 surviving mutant means the rule is untested, whatever the assertions say.
 
+Two of the mutants are there to catch a rule being made *stricter* rather than
+weaker — `vacuity-refuses-a-log-that-measured-something` and
+`credential-lint-refuses-an-environment-reference`. A gate tested only on the
+cases it should catch is half-tested, and the half nobody plants a mutant for is
+the half that quietly starts refusing real work.
+
 Building it immediately paid: it caught `test_an_unknown_status_is_never_stored`
 passing for the wrong reason — the transition table was rejecting the bad status
 before the vocabulary check ever ran, so the vocabulary check itself was
@@ -300,26 +466,43 @@ Stated plainly, because a tool about honest evidence should be honest about
 itself.
 
 1. **`--run "echo done"` closes a job.** See §1. The lie is small, attached and
-   auditable, not prevented.
+   auditable, not prevented. `echo done` matches no vacuity phrase and carries no
+   control unless you supply one, so §1a narrows this hole without closing it.
 2. **The `--verify-*` form trusts transcription.** By design; it is the only way
-   to accept CI evidence at all.
+   to accept CI evidence at all. It also cannot carry a negative control, for
+   the reason in §1a: bevis has to have run the control for its failure to be
+   worth anything.
 3. **Nothing checks that a check is relevant.** `--cmd true` is a valid blocking
    check that always passes. bevis records what you chose to measure.
-4. **The event log is not tamper-evident.** No hash chain, no signatures. Anyone
+4. **A negative control is opt-in, and a check has none at all.**
+   `--negative-control` lives on `bevis close`, not on `bevis check add`, so the
+   dispatcher's closes are covered by the vacuity rule and by nothing else.
+   Giving a check its own control is the obvious next move and is deliberately
+   not in 0.2.0: it needs a column, a dispatcher change and a second calibration,
+   and shipping the smaller thing first is how the smaller thing stays honest.
+5. **A control proves the command can fail, not that it fails for the right
+   reason.** It might be exiting non-zero because the check works, or because a
+   path is wrong. bevis observes one bit and stores the control's output next to
+   it so the next reader can see why; it cannot tell the two apart.
+6. **The vacuity lexicon is a phrase list.** Ten shapes, deliberately narrower
+   than the obvious version (§1a), and blind to a domain counter that is simply
+   wrong — `redacted_count: 0` from a redactor that redacted 178 times reads like
+   any other number.
+7. **The event log is not tamper-evident.** No hash chain, no signatures. Anyone
    with the file can rewrite history; bevis raises the effort, it does not make
    it impossible.
-5. **Concurrency is single-machine.** SQLite + WAL is fine for slots on one host
+8. **Concurrency is single-machine.** SQLite + WAL is fine for slots on one host
    and for a small team through the HTTP API. It is not a distributed queue.
-6. **No pagination, no full-text search.** Boards of a few thousand jobs are
+9. **No pagination, no full-text search.** Boards of a few thousand jobs are
    fine; a hundred thousand are not the target.
-7. **The credential refusal on `bevis adapter add` is a lint.** It knows five
+10. **The credential refusal on `bevis adapter add` is a lint.** It knows five
    shapes and the README lists them; `curl -u user:pass`, an `X-Auth-Token:`
    header, a `?token=` in a query string and anything encoded all walk past. It
    also guards only that one command: a raw `bevis run --adapter '<command>'`
    reaches `job_run.adapter_cmd` unlinted. What is structural is that bevis has
    no field that asks for a secret; what is heuristic is the refusal that stops
    you writing one into the field it does have.
-8. **A doctor probe proves an adapter answers, not that it works.** One call,
+11. **A doctor probe proves an adapter answers, not that it works.** One call,
    with a throwaway job and `BEVIS_DOCTOR_PROBE=1` — an adapter that
    short-circuits on that flag has told doctor almost nothing. Doctor reports
    what it ran and nothing else, which is why every adapter it did not call is
