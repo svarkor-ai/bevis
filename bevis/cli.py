@@ -11,7 +11,7 @@ import json
 import sys
 from typing import Optional
 
-from . import __version__, core
+from . import __version__, adapters, core, doctor
 from .db import connect, get_job, init_db, resolve_db_path
 from .dispatch import dispatch
 from .errors import BevisError
@@ -172,10 +172,31 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--name", required=True)
     c.add_argument("--actor", default="")
 
+    p = sub.add_parser("adapter", help="name a command so you can stop retyping it")
+    asub = p.add_subparsers(dest="adapter_command", required=True)
+    a = asub.add_parser("add")
+    a.add_argument("name")
+    a.add_argument("--cmd", required=True,
+                   help="the command bevis will run; it owns its own "
+                        "configuration, and bevis never reads it")
+    a.add_argument("--note", default="", help="what this adapter is, for humans")
+    a.add_argument("--actor", default="")
+    asub.add_parser("list")
+    a = asub.add_parser("remove", aliases=["rm"])
+    a.add_argument("name")
+    a.add_argument("--actor", default="")
+
+    p = sub.add_parser("doctor", help="say what is working here and what is not")
+    p.add_argument("--adapter",
+                   help="also CALL this registered adapter (or command) against a "
+                        "throwaway probe job and report what it did")
+    p.add_argument("--timeout", type=int, default=doctor.PROBE_TIMEOUT)
+
     p = sub.add_parser("run", help="claim ready jobs and run an adapter on them")
     p.add_argument("--adapter", required=True,
-                   help="command template; {id} {display_id} {title} {description} "
-                        "{acceptance} {assignee} are substituted, shell-quoted")
+                   help="a registered adapter name, or a command template; "
+                        "{id} {display_id} {title} {description} {acceptance} "
+                        "{assignee} are substituted, shell-quoted")
     p.add_argument("--slots", type=int, default=1, help="parallel workers")
     p.add_argument("--max-jobs", type=int, default=None)
     p.add_argument("--timeout", type=int, default=core.DEFAULT_TIMEOUT)
@@ -209,6 +230,12 @@ def run_command_line(args, db_path) -> int:
         path = init_db(db_path)
         emit({"db": str(path)}, as_json, "initialised bevis database at %s" % path)
         return EXIT_OK
+
+    if args.command == "doctor":
+        results = doctor.diagnose(db_path, probe_name=args.adapter,
+                                  timeout=args.timeout)
+        emit(results, as_json, doctor.render(results))
+        return doctor.exit_code(results)
 
     if args.command == "serve":
         from .api import serve
@@ -316,6 +343,23 @@ def run_command_line(args, db_path) -> int:
                 core.remove_check(conn, args.id, args.name, actor=args.actor)
                 emit({"removed": args.name}, as_json,
                      "removed check %r from job %s" % (args.name, args.id))
+
+        elif args.command == "adapter":
+            if args.adapter_command == "add":
+                row = adapters.add(conn, args.name, args.cmd, note=args.note,
+                                   actor=args.actor)
+                emit(row, as_json, "registered adapter %s = %s"
+                     % (row["name"], row["cmd"]))
+            elif args.adapter_command == "list":
+                rows = adapters.list_all(conn)
+                emit(rows, as_json, "\n".join(
+                    "%-12s %s%s" % (r["name"], r["cmd"],
+                                    "   # " + r["note"] if r["note"] else "")
+                    for r in rows) or "(no adapters registered)")
+            else:
+                adapters.remove(conn, args.name, actor=args.actor)
+                emit({"removed": args.name}, as_json,
+                     "removed adapter %s" % args.name)
 
         elif args.command == "run":
             results = dispatch(db_path, args.adapter, slots=args.slots,

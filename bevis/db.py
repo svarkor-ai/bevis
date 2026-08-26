@@ -1,7 +1,7 @@
 """Storage: one SQLite file, stdlib sqlite3, no ORM.
 
 Why no ORM: the whole point of bevis is that a reader can audit the rules in an
-afternoon. Five CREATE TABLE statements you can read is a feature. The file is
+afternoon. Six CREATE TABLE statements you can read is a feature. The file is
 also the interchange format — `sqlite3 .bevis/bevis.db` is a supported way to
 inspect a board, and every gate lives in Python, not in a trigger, so nothing
 about the schema is load-bearing magic.
@@ -18,7 +18,7 @@ from .errors import NotFound, UsageError
 
 DEFAULT_DIR = ".bevis"
 DEFAULT_FILE = "bevis.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job (
@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS event (
   detail  TEXT    NOT NULL DEFAULT ''
 );
 
+-- Named adapters: a NAME for a command line, so `bevis run --adapter myagent`
+-- does not mean retyping it. Names and commands only. bevis holds no endpoint,
+-- no model name and no credential of yours -- the command owns its own config,
+-- and `bevis adapter add` refuses a command with a secret written into it.
+CREATE TABLE IF NOT EXISTS adapter (
+  name       TEXT PRIMARY KEY,
+  cmd        TEXT NOT NULL,
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -136,10 +147,19 @@ def connect(path, create: bool = False) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    # WAL + a real busy timeout: `bevis run --slots N` has N writers.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        # WAL + a real busy timeout: `bevis run --slots N` has N writers.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.DatabaseError as exc:
+        # A --db or $BEVIS_DB pointing at something that is not a database is a
+        # user's mistake, not a bug, and it must not reach them as a traceback.
+        conn.close()
+        raise UsageError(
+            "%s is not a SQLite database (%s) — point --db or $BEVIS_DB at a "
+            "bevis board, or run `bevis init` to create one" % (path, exc)
+        ) from exc
     return conn
 
 
@@ -151,7 +171,7 @@ def init_db(path) -> Path:
         conn.executescript(SCHEMA)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT(key) DO NOTHING",
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(SCHEMA_VERSION),),
         )
     finally:

@@ -22,7 +22,7 @@ import shlex
 import threading
 from typing import List, Optional
 
-from . import core
+from . import adapters, core
 from .db import connect, get_job, log_event
 from .errors import Refusal, UsageError
 from .model import now_ts
@@ -230,6 +230,14 @@ def dispatch(db_path, adapter: str, slots: int = 1, max_jobs: Optional[int] = No
     """
     if slots < 1:
         raise UsageError("--slots must be at least 1")
+    # A registered NAME is shorthand for a command template; resolve it once,
+    # here, so every worker renders and records the command that actually runs
+    # rather than the alias it was reached by.
+    conn = connect(db_path)
+    try:
+        adapter, _name = adapters.resolve(conn, adapter)
+    finally:
+        conn.close()
     # Validate the template BEFORE claiming anything. A bad template that only
     # blows up mid-run would leave a job claimed by a worker that never existed.
     render_adapter(adapter, {"id": 0, "display_id": "0", "title": "", "description": "",

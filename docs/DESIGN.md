@@ -97,7 +97,7 @@ be available. Use `--after` when you mean ordering.
 
 ## 6. The dispatcher, and the thing it may not do
 
-`bevis run --adapter '<template>' [--slots N]`:
+`bevis run --adapter '<template-or-registered-name>' [--slots N]`:
 
 1. atomically claims a ready job (`BEGIN IMMEDIATE` + a status-guarded `UPDATE`;
    two slots cannot both get `rowcount == 1`);
@@ -136,7 +136,98 @@ semicolon could break out into a command. The same values are always available
 as `$BEVIS_JOB_*` environment variables, which is the safe way to use them
 inside a quoted string.
 
-## 7. `closed` vs `verified`
+## 7. Named adapters, and what the registry may not hold
+
+`--adapter` takes a command template. `bevis adapter add myagent --cmd
+'./my-agent.sh'` gives that template a name so you stop retyping it, and `bevis
+run --adapter myagent` resolves it.
+
+The registry has four columns: `name`, `cmd`, `note`, `created_at`. There is no
+column for an endpoint, a model, a host or a key, and that absence is the whole
+product. bevis never asks for any of it: an adapter is a command it executes,
+the command owns its own configuration, and bevis learns nothing about the far
+end except an exit code. A registry is exactly where that would quietly stop
+being true — it is where the "just one field for the API key" field would go —
+so `tests/test_adapters.py` asserts the column set directly and fails if it
+grows.
+
+Be precise about what that does and does not mean. `cmd` is free text: it holds
+whatever command line you gave it, so `MODEL_URL=… ./agent.sh` puts a URL on
+your board, and so does the same string passed straight to `bevis run`, which
+lands in `job_run.adapter_cmd` with no lint in front of it. The guarantee is
+that bevis has no field that *asks* for your configuration and no code that
+reads one — not that a command line you wrote is somehow not stored.
+
+A name-only schema does not by itself stop somebody pasting a key into the
+command, so there is a second half: `bevis adapter add` refuses a command
+carrying a credential and names the two places it belongs instead — the
+adapter's own environment, or a wrapper script. That rule is calibrated in both
+directions on purpose. `--api-key $OPENAI_API_KEY` is a *reference*, not a
+secret, and is allowed; a rule that refused it would teach people to obfuscate
+the literal rather than move it out of bevis. Both directions have a mutant
+(`registry-stores-a-pasted-credential`,
+`credential-lint-refuses-an-environment-reference`), because a gate tested only
+on the cases it should catch is half-tested.
+
+Two calibration decisions worth stating, because both were bugs first:
+
+* **A quote is not a reference.** The rule reads one opening quote and then asks
+  what is behind it, so `--token="hunter2"` is refused and `--api-key "$MY_KEY"`
+  is not. An earlier version treated any adjacent quote as a reference, which
+  meant two characters walked every pasted secret past it.
+* **Only a *leading* `NAME=value` is an environment variable.** `make KEY=value`,
+  `helm --set TOKEN=managed` and `sed 's/KEY=old/KEY=new/'` are arguments, not
+  secrets, and an earlier version refused all three — with no override, which
+  would have left a user simply unable to register a working command.
+
+The schema is structural; the refusal is a lint, and the README lists what it
+knows and what walks past, where a user will read it rather than here where they
+will not.
+
+Resolution is deliberately narrow. Only a bare identifier is looked up, so
+`--adapter true` still means the command `true` — and it keeps meaning that,
+because a name that resolves on your `PATH` is refused at registration. Adding
+an adapter must not change what an existing command line means for the next
+person to run it. The RESOLVED command is what the `job_run` row records:
+evidence names what actually ran, never the alias it was reached by.
+
+Registration also renders the template once, with an empty job, so a template
+bevis can never render (`bash -c 'echo {title}'` — see §6) is refused now rather
+than at `bevis run`, after a job has already been claimed for it.
+
+## 8. `bevis doctor`
+
+A diagnosis, not a status page. Three rules:
+
+* **Every problem is a FAIL that names the command which fixes it**, and the
+  process exits non-zero so it can gate a script. "Everything is green" is the
+  failure mode DOCTRINE §3 exists for, and a doctor that prints a column of
+  ticks is that failure mode in a nicer font.
+* **It never reports an adapter as working that it did not call.** Whether
+  an adapter is
+  executable can be answered by looking at the file system. Whether it
+  *responds* cannot — and calling every registered adapter to find out would
+  spend an agent run per diagnosis on somebody else's machine. So doctor calls
+  only the adapter named with `--adapter`, and reports the rest `unproven`.
+  That is the same rule as a blocking check that has never been run: unproven is
+  not passing, and it is not failing either.
+* **The probe is the literal artifact**, not a reconstruction of it: the same
+  rendering, the same `BEVIS_JOB_*` environment and the same subprocess call
+  `bevis run` makes, plus `BEVIS_DOCTOR_PROBE=1` so an adapter that drives a
+  real agent can answer cheaply. What that proves is that the adapter starts and
+  exits 0 on a probe. It does not prove the adapter can do a job, and doctor
+  does not claim it does. Being the literal call has a cost worth knowing: the
+  probe hands the adapter `$BEVIS_DB` pointing at your real board, because a
+  real run does, so an adapter that writes to the board will write to it during
+  a diagnostic.
+
+doctor is also the only command that has to work before the board exists — it is
+what you type when bevis has just told you there is no database — so it opens
+the file itself and reports a missing one as a finding, with the command that
+creates it, instead of dying in the connection helper every other command goes
+through.
+
+## 9. `closed` vs `verified`
 
 `closed` = the evidence exists. `verified` = a different actor looked at it.
 
@@ -149,10 +240,10 @@ that turns out to be wrong can be undone with `bevis reopen --reason ...`, which
 clears the evidence *after* copying it into the event log. Losing the record of
 a bad close would lose the most interesting thing that happened to that job.
 
-## 8. Storage
+## 10. Storage
 
-One SQLite file, stdlib `sqlite3`, no ORM, WAL mode, five tables you can read in
-five minutes. Every gate lives in Python, not in a trigger, so nothing about the
+One SQLite file, stdlib `sqlite3`, no ORM, WAL mode, six small tables you can
+read in five minutes. Every gate lives in Python, not in a trigger, so nothing about the
 schema is load-bearing magic and `sqlite3 .bevis/bevis.db` is a supported way to
 look around.
 
@@ -160,14 +251,14 @@ bevis cannot stop you editing that file by hand. It does refuse to dispatch what
 it finds there if the row is nonsense — a job whose bar was erased is never
 ready.
 
-## 9. Ids
+## 11. Ids
 
 Every job has an integer id. A child also has a dotted display id — `7.2` is the
 second child of job 7 — and both resolve everywhere. An id that resolves to
 nothing is a loud error, never a silent no-op: a reference nobody notices is
 worse than a crash.
 
-## 10. Testing the tests
+## 12. Testing the tests
 
 `tools/mutation_check.py` plants one realistic defect at a time in a copy of the
 tree and asserts that the guarding test fails. Every rule above has a mutant. A
@@ -193,7 +284,7 @@ imports with `ast` so "stdlib only, no network, no model" is checked rather than
 promised. All of it runs on every push and pull request
 (`.github/workflows/ci.yml`).
 
-## 11. Deliberate non-goals
+## 13. Deliberate non-goals
 
 * **No retries, schedules or DAG execution.** Durable execution engines exist and
   are better at it. bevis is the gate they can call.
@@ -203,7 +294,7 @@ promised. All of it runs on every push and pull request
   will; a gate that needs a model to decide whether something passed is not a
   gate.
 
-## 12. Known holes
+## 14. Known holes
 
 Stated plainly, because a tool about honest evidence should be honest about
 itself.
@@ -221,3 +312,15 @@ itself.
    and for a small team through the HTTP API. It is not a distributed queue.
 6. **No pagination, no full-text search.** Boards of a few thousand jobs are
    fine; a hundred thousand are not the target.
+7. **The credential refusal on `bevis adapter add` is a lint.** It knows five
+   shapes and the README lists them; `curl -u user:pass`, an `X-Auth-Token:`
+   header, a `?token=` in a query string and anything encoded all walk past. It
+   also guards only that one command: a raw `bevis run --adapter '<command>'`
+   reaches `job_run.adapter_cmd` unlinted. What is structural is that bevis has
+   no field that asks for a secret; what is heuristic is the refusal that stops
+   you writing one into the field it does have.
+8. **A doctor probe proves an adapter answers, not that it works.** One call,
+   with a throwaway job and `BEVIS_DOCTOR_PROBE=1` — an adapter that
+   short-circuits on that flag has told doctor almost nothing. Doctor reports
+   what it ran and nothing else, which is why every adapter it did not call is
+   `unproven` rather than `ok`.

@@ -170,6 +170,115 @@ MUTANTS = [
      '''    quoted = _quoted_placeholder(template)
     if False:''',
      ["test_a_placeholder_inside_quotes_is_refused"]),
+
+    # ── The adapter registry ────────────────────────────────────────────────
+    ("registered-adapter-name-not-resolved", "bevis/adapters.py",
+     '''    if NAME_RE.match(text) and has_registry(conn):''',
+     '''    if False:''',
+     ["test_a_registered_adapter_name_resolves_to_its_command",
+      "test_cli_run_accepts_a_registered_name"]),
+
+    ("registry-stores-a-pasted-credential", "bevis/adapters.py",
+     '''    problem = credential_problem(cmd)
+    if problem:''',
+     '''    problem = credential_problem(cmd)
+    if False:''',
+     ["test_registering_an_inline_credential_is_refused",
+      "test_the_shapes_a_pasted_secret_takes_are_refused",
+      "test_the_cli_refuses_to_store_a_credential"]),
+
+    # The same gate in the other direction. A credential rule that also refuses
+    # `--api-key $MY_KEY` teaches people to hide the literal instead of moving
+    # it out of bevis, so the permissive half is a rule too, and is tested.
+    # The same gate in the other direction: a rule that also refused
+    # `--api-key $MY_KEY` would teach people to hide the literal rather than
+    # move it out of bevis, so the permissive half is a rule too.
+    ("credential-lint-refuses-an-environment-reference", "bevis/adapters.py",
+     '''_REFERENCE_STARTS = ("$", "`")''',
+     '''_REFERENCE_STARTS = ()''',
+     ["test_a_secret_referenced_from_the_environment_is_not_a_secret"]),
+
+    # Two quote characters used to walk every pasted secret past the rule.
+    ("credential-lint-fooled-by-quotes", "bevis/adapters.py",
+     '''    text = rest.lstrip()
+    if text[:1] in ("'", '"'):
+        text = text[1:]''',
+     '''    text = rest.lstrip()''',
+     ["test_the_shapes_a_pasted_secret_takes_are_refused"]),
+
+    ("adapter-name-may-shadow-a-program", "bevis/adapters.py",
+     '''    if shutil.which(name):''',
+     '''    if False:''',
+     ["test_a_name_that_is_also_a_program_is_refused"]),
+
+    ("unrunnable-template-registered", "bevis/adapters.py",
+     '''    render_adapter(cmd, {"id": 0, "display_id": "0", "title": "", "description": "",
+                         "acceptance": "", "assignee": ""})''',
+     '''    pass''',
+     ["test_a_template_that_can_never_render_is_refused_at_registration"]),
+
+    ("garbage-database-reaches-the-user-as-a-traceback", "bevis/db.py",
+     '''    except sqlite3.DatabaseError as exc:''',
+     '''    except _NeverRaised as exc:''',
+     ["test_doctor_reports_a_file_that_is_not_a_database_instead_of_crashing",
+      "test_a_file_that_is_not_a_database_is_a_refusal_for_every_command"]),
+
+    ("doctor-board-note-counts-jobs-the-dispatcher-never-sees", "bevis/doctor.py",
+     '''    without = [job for job in core.ready_jobs(conn)
+               if not core.list_checks(conn, job["id"])]''',
+     '''    without = [dict(row) for row in conn.execute(
+        "SELECT j.id FROM job j WHERE j.status=\'open\' AND NOT EXISTS "
+        "(SELECT 1 FROM job_check c WHERE c.job_id=j.id)")]''',
+     ["test_the_board_note_counts_only_what_the_dispatcher_will_reach"]),
+
+    ("doctor-drops-the-probe-it-was-asked-for", "bevis/doctor.py",
+     '''    if probe_name and not any(r["section"] == "adapters" for r in results):''',
+     '''    if False:''',
+     ["test_doctor_still_answers_about_the_adapter_it_was_asked_about"]),
+
+    ("old-board-gets-a-raw-sqlite-error", "bevis/adapters.py",
+     '''    if not has_registry(conn):
+        raise UsageError(''',
+     '''    if False:
+        raise UsageError(''',
+     ["test_a_board_that_predates_the_registry_names_the_one_command_that_fixes_it"]),
+
+    # ── doctor ──────────────────────────────────────────────────────────────
+    ("doctor-exits-zero-with-failures", "bevis/doctor.py",
+     '''    return 1 if any(r["status"] == FAIL for r in results) else 0''',
+     '''    return 0''',
+     ["test_cli_doctor_exits_nonzero_when_something_is_broken",
+      "test_doctor_fails_when_there_is_no_database",
+      "test_doctor_fails_when_the_probed_adapter_exits_nonzero"]),
+
+    ("doctor-ignores-a-non-executable-adapter", "bevis/doctor.py",
+     '''        if not os.access(path, os.X_OK):''',
+     '''        if False:''',
+     ["test_doctor_fails_when_a_registered_adapter_is_not_executable"]),
+
+    ("doctor-ignores-an-adapter-that-is-not-on-path", "bevis/doctor.py",
+     '''    if shutil.which(program) is None:''',
+     '''    if False:''',
+     ["test_doctor_fails_when_the_adapter_program_is_not_on_path"]),
+
+    ("doctor-reports-a-failed-probe-as-ok", "bevis/doctor.py",
+     '''    if exit_code == 0:''',
+     '''    if True:''',
+     ["test_doctor_fails_when_the_probed_adapter_exits_nonzero",
+      "test_doctor_fails_when_the_probed_adapter_never_returns"]),
+
+    # The tidy-looking refactor that costs somebody an agent run per diagnosis,
+    # and turns "unproven" into "ok" for every adapter on the board.
+    ("doctor-calls-every-adapter-it-finds", "bevis/doctor.py",
+     '''        elif row["name"] == probe_name:
+            continue                # probed below, where the real answer is
+        else:''',
+     '''        elif row["name"] == probe_name:
+            continue                # probed below, where the real answer is
+        elif probe(row["cmd"], db_path, timeout=timeout)[0] == 0:
+            results.append(_result("adapters", OK, "%s ran" % row["name"]))
+        else:''',
+     ["test_doctor_does_not_call_an_adapter_it_was_not_asked_to_call"]),
 ]
 
 IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc",

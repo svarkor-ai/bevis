@@ -15,7 +15,8 @@ say so and it will be corrected — being accurate about the neighbours matters 
 here than looking good next to them.
 
 **What is checked, and by what.** Everything in *[What bevis claims](#what-bevis-claims)*
-was re-read against the built code on 2026-08-25, and each claim there names the test
+was re-read against the built code on 2026-08-25 — claim 7 on 2026-08-26, when the
+adapter registry it describes was added — and each claim there names the test
 that fails if the claim is false. Claims about *other* projects are quotes from their own
 pages, read on the date above and not re-verified since; they are the weakest material on
 this page and are marked where they are thin.
@@ -57,7 +58,7 @@ without the evidence attached.
 | **pi-tasks** (published by `nczz`, MIT) | "Pi-native execution contracts for AI agents — evidence-gated completion, ordered plans, and compaction-safe resume". | Ships bevis's core invariant already, inside the Pi runtime: "Agents cannot mark work done without traceable, reproducible proof", and `task_complete` rejects when "No evidence exists" or "All evidence is only `not_verified`". It also solves something bevis ignores — surviving context compaction, with resume on `session_start`. | It is bound to the Pi agent runtime and its evidence is artifact references; whether a command and exit code are captured automatically is **UNVERIFIED** (the page does not say). bevis is runtime-agnostic, calls no model, and shells out to any command. | [pi.dev/packages/pi-tasks](https://pi.dev/packages/pi-tasks) |
 | **Task Master** (`eyaltoledano/claude-task-master`) | "A task management system for AI-driven development with Claude" — parses a PRD into a decomposed task tree. | Decomposition is its whole craft, and it is enormously more popular. If your problem is "turn this spec into a sensible ordered task list", this is the tool. | Licence is **MIT with Commons Clause**, which is not OSI-open: "Not Allowed: Sell Task Master itself, Offer Task Master as a hosted service, Create competing products based on Task Master". No acceptance-bar-on-close mechanism appears in the README I read. bevis is plain Apache-2.0. | [repo](https://github.com/eyaltoledano/claude-task-master) |
 | **OpenHands** (`All-Hands-AI/OpenHands`, MIT) | "The self-hosted developer control center for coding agents and automations" — "Run OpenHands, Claude Code, Codex, Gemini, or any ACP-compatible agent across local, remote, and cloud backends." | It is the thing that does the work. Sandboxes, runtimes, a UI, integrations, and years of engineering. bevis is not in this category and should not be compared on it. | It is a worker, not a ledger: no durable acceptance-gated job record documented in the README I read. bevis is a sane thing to put *in front of* OpenHands — it can dispatch to it and refuse to close on its say-so. | [repo](https://github.com/All-Hands-AI/OpenHands) |
-| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested`, which "checks command, arguments, working directory, exit code, and output digest when execution is required", and `ProducerAuthorized`, which "checks that the actor, lane, host/session, or signing key is authorized for the claim" — both strictly stronger than what bevis stores. If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file that you can run from a checkout today (it is not published on any index), with a much thinner notion of evidence (no freshness binding, no signatures, no tamper-evidence). | [arXiv](https://arxiv.org/abs/2607.14890) |
+| **Proof-or-Stop** (arXiv 2607.14890) | A paper, not a product: "Proof-or-Stop Lifecycle Control, a method that permits lifecycle transitions only when fresh, tracked-source-state-bound, mechanically verifiable evidence satisfies the relevant gate." | It has thought this through properly, with a formal admissibility predicate and an evaluation. Its conditions include `ExecutionAttested`, which "checks command, arguments, working directory, exit code, and output digest when execution is required", and `ProducerAuthorized`, which "checks that the actor, lane, host/session, or signing key is authorized for the claim" — both strictly stronger than what bevis stores. If you want the theory behind what bevis does, read this, not bevis. | It is a method plus an evaluated implementation; I could not locate the public repository, so what it ships is **UNVERIFIED**. bevis is a stdlib CLI over one SQLite file (`pip install bevis`), with a much thinner notion of evidence (no freshness binding, no signatures, no tamper-evidence). | [arXiv](https://arxiv.org/abs/2607.14890) |
 
 ---
 
@@ -120,7 +121,7 @@ possible thing — a stdlib CLI over a SQLite file, no model, no daemon required
 
 ## What bevis claims
 
-Six claims, and not one more. Each is a rule the code applies rather than advice it
+Seven claims, and not one more. Each is a rule the code applies rather than advice it
 offers, and each one names the test that fails if it is false. Run `python -m pytest -q`
 to watch them pass, and `python tools/mutation_check.py` to watch each of those tests go
 **red** when the rule it guards is deleted from the source — a test that has never been
@@ -153,6 +154,16 @@ belong on this page; that is the same standard bevis holds a job to.
    and imports nothing that could reach a network; no module in the package imports a
    model-provider SDK; the FastAPI server is an optional extra. bevis calls no language
    model, so it behaves the same behind a frontier model, a local one, or a shell script.
+7. **bevis never asks for your configuration and has no field to keep it in.** An
+   adapter is a command bevis executes, and that command owns its own endpoint, model
+   and credentials — bevis learns nothing about the far end except an exit code. The
+   adapter registry has four columns, `name`, `cmd`, `note` and `created_at`, and no
+   field for anything else. What it does store is the command line you gave it, verbatim,
+   so `bevis adapter add` refuses one with a credential written into it, calibrated in
+   both directions, so that referencing `$YOUR_KEY` out of the adapter's own environment
+   stays the right answer rather than becoming the thing to hide. The schema is
+   structural. The refusal is a lint, and [Limitations](README.md#limitations) lists what
+   it knows and what walks past.
 
 | # | Claim | Enforced in | Test that fails if the claim is false | Mutant that proves that test can fail |
 |---|---|---|---|---|
@@ -162,6 +173,7 @@ belong on this page; that is the same standard bevis holds a job to.
 | 4 | The dispatcher never decides success | `dispatch.process_job` | `test_adapter_exit_zero_alone_does_not_close_a_job`, `test_the_dispatcher_cannot_overrule_a_refusal` | `dispatcher-decides-success-itself` |
 | 5 | `verified` needs a different actor | `core.verify_job` | `test_verify_by_the_actor_who_closed_it_is_refused`, `test_verify_ignores_case_when_comparing_actors`, `test_cli_verify_by_the_closer_exits_1` | `self-verification-allowed` |
 | 6 | Stdlib-only core, no network, no model SDK anywhere | package imports, `pyproject.toml` | `test_the_core_imports_only_the_standard_library`, `test_the_core_cannot_reach_a_network`, `test_no_module_imports_a_model_provider_sdk`, `test_the_package_declares_no_runtime_dependencies` | none — these read the package's own imports with `ast`, so there is no rule in the code to delete. They fail the moment an import appears. |
+| 7 | No credential, endpoint or model of yours inside bevis | `bevis.adapters`, the `adapter` table | `test_the_registry_stores_only_a_name_and_a_command`, `test_registering_an_inline_credential_is_refused`, `test_the_shapes_a_pasted_secret_takes_are_refused`, `test_a_secret_referenced_from_the_environment_is_not_a_secret` | `registry-stores-a-pasted-credential`, `credential-lint-refuses-an-environment-reference` |
 
 Two things the table deliberately does not launder. Claim 4's atomic claim — one job per
 slot, ever — has a test that compares recorded run intervals, but **no mutant**: remove

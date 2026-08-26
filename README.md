@@ -140,6 +140,110 @@ look at, and a queue that silently retries it forever is how one broken step
 burns a night of compute. Every blocked reason ends with the command that
 requeues it.
 
+## Quickstart: plug in your own agent
+
+**bevis never asks you for a credential, an endpoint, a model name or a GPU
+address, and has no field to keep one in.** An adapter is a *command* bevis
+executes; the command owns its own configuration, reads its own environment, and
+talks to whatever it likes. bevis hands it a job and reads back an exit code.
+That is why a local model server, a cloud API, a box with a GPU in it and a
+coding agent all plug in the same way, and why there is no bevis-side
+configuration of yours to keep in step with anything.
+
+What bevis does store is the command line you hand it, verbatim. Write a URL on
+it and that URL is on your board — which is why `bevis adapter add` refuses a
+command with a credential written into it and points at your adapter's own
+environment instead.
+
+```sh
+pip install bevis
+```
+
+Then, end to end, with a stand-in agent you can replace with yours:
+
+```console
+$ mkdir bevis-quickstart && cd bevis-quickstart && export BEVIS_ACTOR=you
+$ export BEVIS_DB=$PWD/.bevis/bevis.db   # a board of its own, just for this walkthrough
+$ bevis init
+initialised bevis database at /tmp/bevis-readme-check/bevis-quickstart/.bevis/bevis.db
+$ # 1. your agent. Any command. bevis never looks inside it.
+$ printf '%s\n' '#!/bin/sh' \
+    '[ "$BEVIS_DOCTOR_PROBE" = 1 ] && { echo "ready (a probe does no work)"; exit 0; }' \
+    'echo "$BEVIS_JOB_TITLE" > NOTES.md' \
+    'echo wrote NOTES.md' > my-agent.sh && chmod +x my-agent.sh
+$ bevis adapter add myagent --cmd "$PWD/my-agent.sh"
+registered adapter myagent = /tmp/bevis-readme-check/bevis-quickstart/my-agent.sh
+$ # 2. before queueing anything: does this actually work here?
+$ bevis doctor --adapter myagent | sed -E 's/bevis [0-9]+\S* on Python.*/bevis <version>, on this Python/'
+bevis
+  ok       bevis <version>, on this Python
+database
+  ok       /tmp/bevis-readme-check/bevis-quickstart/.bevis/bevis.db — 0 job(s), 0 ready
+actor
+  ok       $BEVIS_ACTOR=you — closes will be recorded under that name
+adapters
+  ok       myagent — ran and exited 0: ready (a probe does no work)
+
+no problems found.
+$ # 3. a job, and the gate that will decide whether it is done
+$ bevis add "Write the release notes" --acceptance "NOTES.md names the release"
+created job 1: Write the release notes
+$ bevis check add 1 --name notes --cmd "grep -q release NOTES.md" --blocking
+added blocking check 'notes' to job 1
+$ # 4. hand it over. The check decides, not the agent and not bevis.
+$ bevis run --adapter myagent
+job 1      closed   1 check(s) passed
+$ bevis show 1 | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/<timestamp>/'
+job        1 (internal id 1)
+title      Write the release notes
+status     closed
+acceptance NOTES.md names the release
+ready      no — status is closed, not open
+created    <timestamp>
+checks:
+  - notes        [blocking] PASS  $ grep -q release NOTES.md
+evidence:
+  closed_by   you#0 at <timestamp>
+  verify_cmd  grep -q release NOTES.md
+  verify_exit 0
+  verify_output:
+    | $ grep -q release NOTES.md
+    | [check notes exit=0]
+```
+
+That job is closed and carries the command that closed it, its exit code and its
+output. Point `--cmd` at your own agent instead and nothing else changes.
+
+Three things in that transcript are worth a second look:
+
+* **The registry stores a name and a command.** Not a URL, not a key, not a
+  model. `bevis adapter add` refuses a command with a credential written into it
+  and tells you to reference `$YOUR_KEY` from the adapter's own environment
+  instead — see [Limitations](#limitations) for how far that goes.
+* **`bevis doctor` fails rather than reassures.** Every problem it finds names
+  the command that fixes it — asserted by `test_every_doctor_failure_names_a_fix`,
+  not by this sentence — and it exits non-zero so you can put it in a script.
+  It calls only the adapter you name with `--adapter`; every other one is
+  reported `unproven`, never `ok`, because doctor will not vouch for something it
+  did not run.
+* **`BEVIS_DOCTOR_PROBE=1`** is set during that call, so an adapter that drives a
+  real agent can answer a diagnostic without spending a job's worth of work on
+  it. Ignoring it is fine; the probe just costs more.
+
+Two worked examples, both runnable, both short enough to read before you
+trust them:
+
+| file | shape | its configuration lives in |
+|---|---|---|
+| [`examples/adapter-local-model.py`](examples/adapter-local-model.py) | HTTP to an OpenAI-compatible server — llama.cpp, vLLM, Ollama, LM Studio, a hosted API | `$MODEL_URL`, `$MODEL_NAME`, `$MODEL_API_KEY` in **its** environment |
+| [`examples/adapter-agent.sh`](examples/adapter-agent.sh) | pipes the job into a command-line agent and keeps the transcript | `$MY_AGENT_CMD` in **its** environment |
+
+Every line of network code in the first one is in that file, which is yours. The
+bevis package imports no HTTP library at all and could not make the call if it
+wanted to — `tests/test_no_dependencies.py` reads the imports with `ast` and
+fails the build if that stops being true. `bevis adapter list` shows what is
+registered; `bevis adapter remove myagent` forgets it.
+
 ## Install
 
 ```sh
@@ -238,6 +342,27 @@ Read this before adopting bevis. None of it is throat-clearing.
 * **The bar can be revised after the fact.** `bevis update --acceptance` cannot
   empty a bar, but it can rewrite one, and the event log records only that the
   field was edited, not what it used to say.
+* **The credential refusal on `bevis adapter add` is a lint, not a boundary.**
+  It knows five shapes: an `Authorization:` or `api-key:` header with a literal
+  value, an `--api-key`/`--token`/`--password` flag with one, a *leading*
+  `SOMETHING_KEY=value` assignment, a password in front of the `@` in a URL, and
+  a literal shaped like a well-known token (`sk-…`, `ghp_…`, `AKIA…`). Everything
+  else walks past — `curl -u user:pass`, an `X-Auth-Token:` header, a `?token=`
+  in a query string, anything encoded or fetched from somewhere it cannot see.
+  It deliberately allows `$YOUR_KEY`, `"$YOUR_KEY"`, `$(pass show …)` and
+  backticks, because a rule that refused the reference would teach people to
+  obfuscate the literal instead of moving it out of bevis; both directions are
+  in the test suite, and both have a mutant. It also guards only `bevis adapter
+  add`: a raw `bevis run --adapter '<command>'` is stored verbatim on the job's
+  run record with no lint at all. What is structural is narrower and worth more:
+  the registry has four columns — name, command, note, timestamp — so bevis
+  never asks for a secret and has no field to keep one in. It does keep the
+  command line you typed, and that is the thing the lint is guarding.
+* **`bevis doctor --adapter` proves an adapter answers, not that it works.** A
+  probe is one call, with a throwaway job and `BEVIS_DOCTOR_PROBE=1`; an adapter
+  that short-circuits on that flag has told doctor almost nothing about what it
+  does with a real job. Doctor reports what it ran and nothing else, which is
+  why every adapter it did not call is reported `unproven` rather than `ok`.
 * **No auth model beyond one optional token.** There are no users, roles or
   permissions. `$BEVIS_TOKEN` gates the HTTP API if it is set, and anyone
   holding it can create, close or verify any job. The actor on a job is whoever
