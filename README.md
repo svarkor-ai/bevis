@@ -158,7 +158,9 @@ bevis refuses two shapes of that. The first costs nothing and is on by default:
 $ bevis add "Run the unit tests" --acceptance "the unit test suite passes"
 created job 5: Run the unit tests
 $ mkdir suite
-$ bevis close 5 --run "python -m unittest discover -s suite"
+$ printf '#!/bin/sh\necho "Ran $(ls suite | wc -l | tr -d " ") tests in 0.001s"\n' > run-tests
+$ chmod +x run-tests
+$ bevis close 5 --run "./run-tests"
 bevis: refusing to close job 5 on evidence that measured nothing:
   - the output says 'Ran 0 tests', and nothing else in it reports a non-zero count
 A run that examined no tests, no files and no rows exited 0 because there was nothing there to disagree with. That is a constant, not a check. Point the command at the work and run it again.
@@ -171,10 +173,17 @@ it just had no tests to run, and a runner with nothing to run cannot disagree
 with you. Give it one and the same command closes the job:
 
 ```console
-$ printf 'import unittest\nclass Arithmetic(unittest.TestCase):\n    def test_addition(self):\n        self.assertEqual(1 + 1, 2)\n' > suite/test_arithmetic.py
-$ bevis close 5 --run "python -m unittest discover -s suite"
-closed job 5 with evidence (exit 0 from: python -m unittest discover -s suite)
+$ touch suite/test_arithmetic.py
+$ bevis close 5 --run "./run-tests"
+closed job 5 with evidence (exit 0 from: ./run-tests)
 ```
+
+That example uses a stand-in runner rather than a real one on purpose: a real
+runner's behaviour here is not stable across versions. Python 3.12 changed
+`unittest` to print `NO TESTS RAN` and exit 5 where 3.10 printed `OK` and exited
+0 — which is to say CPython now enforces this same rule itself. bevis still has
+to, because a runner that exits 0 having measured nothing is the general case,
+and `unittest` is one runner that got fixed.
 
 The second shape needs a phrase list to be lucky, and a negative control to be
 sure. Here is a secret scanner with the defect above — its failure path prints
